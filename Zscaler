@@ -1,0 +1,373 @@
+---
+# Zscaler ZIA URL Whitelist Automation Playbook
+# This playbook adds URLs to Zscaler Internet Access whitelist via REST API
+
+- name: Zscaler ZIA URL Whitelist Automation
+  hosts: localhost
+  gather_facts: no
+  vars:
+    # These variables are passed from the FastAPI application
+    # request_id: "WL-20250105-ABC123"
+    # servicenow_ticket: "INC0012345"
+    # urls: ["https://example.com", "https://api.example.com"]
+    # requester_email: "user@company.com"
+    # requester_name: "John Doe"
+    # category: "Business"
+    # justification: "Required for business operations"
+    # zscaler_admin_url: "https://admin.zscalertwo.net"
+    # zscaler_api_key: "encrypted_key"
+    # zscaler_username: "admin@company.com"
+    # zscaler_password: "encrypted_password"
+    
+    # Zscaler API configuration
+    zscaler_api_version: "v1"
+    zscaler_timeout: 30
+    
+    # Custom URL category name for automated whitelisting
+    custom_category_name: "Automated_Whitelist"
+    custom_category_id: null
+    
+  tasks:
+    - name: Display request information
+      debug:
+        msg: |
+          ========================================
+          Zscaler Whitelist Automation Starting
+          ========================================
+          Request ID: {{ request_id }}
+          ServiceNow Ticket: {{ servicenow_ticket }}
+          Requester: {{ requester_name }} ({{ requester_email }})
+          Category: {{ category }}
+          Number of URLs: {{ urls | length }}
+          URLs: {{ urls | join(', ') }}
+          ========================================
+
+    - name: Validate required variables
+      fail:
+        msg: "Missing required variable: {{ item }}"
+      when: vars[item] is not defined or vars[item] == ""
+      loop:
+        - request_id
+        - servicenow_ticket
+        - urls
+        - requester_email
+        - zscaler_admin_url
+        - zscaler_api_key
+        - zscaler_username
+        - zscaler_password
+
+    - name: Generate timestamp for API obfuscation
+      set_fact:
+        api_timestamp: "{{ ansible_date_time.epoch }}000"
+
+    - name: Obfuscate API key for authentication
+      shell: |
+        python3 << 'EOF'
+        import sys
+        
+        def obfuscate_api_key(api_key, timestamp):
+            """Obfuscate Zscaler API key according to their algorithm"""
+            n = timestamp[-6:]
+            r = str(int(n) >> 1).zfill(6)
+            key = ""
+            for i in range(len(n)):
+                key += api_key[int(n[i])]
+            for j in range(len(r)):
+                key += api_key[int(r[j]) + 2]
+            return key
+        
+        api_key = "{{ zscaler_api_key }}"
+        timestamp = "{{ api_timestamp }}"
+        
+        obfuscated = obfuscate_api_key(api_key, timestamp)
+        print(obfuscated)
+        EOF
+      register: obfuscated_key
+      changed_when: false
+      no_log: true
+
+    - name: Authenticate with Zscaler ZIA API
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/authenticatedSession"
+        method: POST
+        body_format: json
+        body:
+          apiKey: "{{ obfuscated_key.stdout }}"
+          username: "{{ zscaler_username }}"
+          password: "{{ zscaler_password }}"
+          timestamp: "{{ api_timestamp }}"
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: auth_response
+      no_log: true
+
+    - name: Extract authentication cookie
+      set_fact:
+        zscaler_cookie: "{{ auth_response.set_cookie }}"
+      no_log: true
+
+    - name: Check if custom URL category exists
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/urlCategories"
+        method: GET
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: existing_categories
+
+    - name: Find custom category ID
+      set_fact:
+        custom_category_id: "{{ item.id }}"
+      loop: "{{ existing_categories.json }}"
+      when: item.configuredName == custom_category_name
+      no_log: false
+
+    - name: Create custom URL category if it doesn't exist
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/urlCategories"
+        method: POST
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          configuredName: "{{ custom_category_name }}"
+          customCategory: true
+          description: "Automated whitelist category created by URL Whitelist Automation System"
+          type: "URL_CATEGORY"
+          urls: []
+          dbCategorizedUrls: []
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: category_creation
+      when: custom_category_id is not defined or custom_category_id == None
+
+    - name: Update custom category ID after creation
+      set_fact:
+        custom_category_id: "{{ category_creation.json.id }}"
+      when: category_creation is changed
+
+    - name: Get current URLs in custom category
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/urlCategories/{{ custom_category_id }}"
+        method: GET
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: current_category
+
+    - name: Prepare URLs for whitelisting
+      set_fact:
+        normalized_urls: "{{ urls | map('regex_replace', '^https?://', '') | map('regex_replace', '^www\\.', '') | list }}"
+
+    - name: Combine existing and new URLs
+      set_fact:
+        all_urls: "{{ (current_category.json.urls | default([])) + normalized_urls }}"
+
+    - name: Remove duplicate URLs
+      set_fact:
+        unique_urls: "{{ all_urls | unique | list }}"
+
+    - name: Update URL category with new whitelisted URLs
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/urlCategories/{{ custom_category_id }}"
+        method: PUT
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          id: "{{ custom_category_id }}"
+          configuredName: "{{ custom_category_name }}"
+          customCategory: true
+          description: |
+            Automated whitelist category
+            Last updated: {{ ansible_date_time.iso8601 }}
+            Request ID: {{ request_id }}
+            ServiceNow Ticket: {{ servicenow_ticket }}
+            Requester: {{ requester_email }}
+          urls: "{{ unique_urls }}"
+          type: "URL_CATEGORY"
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: category_update
+
+    - name: Get firewall filtering rules
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/firewallFilteringRules"
+        method: GET
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: firewall_rules
+
+    - name: Check if whitelist rule exists for custom category
+      set_fact:
+        whitelist_rule_exists: "{{ firewall_rules.json | selectattr('name', 'search', 'Automated Whitelist Allow') | list | length > 0 }}"
+
+    - name: Create firewall rule to allow custom category (if not exists)
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/firewallFilteringRules"
+        method: POST
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Automated Whitelist Allow - {{ custom_category_name }}"
+          description: "Automatically created rule to allow whitelisted URLs"
+          order: 1
+          rank: 7
+          state: "ENABLED"
+          action: "ALLOW"
+          destIpCategories:
+            - "{{ custom_category_id }}"
+          departments: []
+          groups: []
+          users: []
+          timeWindows: []
+          locations: []
+          locationGroups: []
+        status_code: 200
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: firewall_rule_creation
+      when: not whitelist_rule_exists
+
+    - name: Activate configuration changes
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/status/activate"
+        method: POST
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          status: "active"
+        status_code: [200, 204]
+        return_content: yes
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      register: activation_result
+
+    - name: Log out from Zscaler API session
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/authenticatedSession"
+        method: DELETE
+        headers:
+          Cookie: "{{ zscaler_cookie }}"
+        status_code: [200, 204]
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      ignore_errors: yes
+
+    - name: Create audit log entry
+      copy:
+        content: |
+          ========================================
+          Zscaler Whitelist Automation - Audit Log
+          ========================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Request ID: {{ request_id }}
+          ServiceNow Ticket: {{ servicenow_ticket }}
+          Requester: {{ requester_name }} ({{ requester_email }})
+          Category: {{ category }}
+          Justification: {{ justification }}
+          
+          URLs Added:
+          {% for url in urls %}
+          - {{ url }}
+          {% endfor %}
+          
+          Zscaler Configuration:
+          - Custom Category ID: {{ custom_category_id }}
+          - Custom Category Name: {{ custom_category_name }}
+          - Total URLs in Category: {{ unique_urls | length }}
+          - Firewall Rule Exists: {{ whitelist_rule_exists }}
+          - Configuration Activated: {{ activation_result.status == 200 or activation_result.status == 204 }}
+          
+          Status: SUCCESS
+          ========================================
+        dest: "/var/log/zscaler-automation/{{ request_id }}.log"
+        mode: '0640'
+      delegate_to: localhost
+
+    - name: Display success message
+      debug:
+        msg: |
+          ========================================
+          ✅ Zscaler Whitelist Automation Complete
+          ========================================
+          Request ID: {{ request_id }}
+          ServiceNow Ticket: {{ servicenow_ticket }}
+          URLs Successfully Whitelisted: {{ urls | length }}
+          Custom Category ID: {{ custom_category_id }}
+          Configuration Activated: YES
+          ========================================
+
+  rescue:
+    - name: Log failure details
+      copy:
+        content: |
+          ========================================
+          Zscaler Whitelist Automation - FAILED
+          ========================================
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          Request ID: {{ request_id }}
+          ServiceNow Ticket: {{ servicenow_ticket }}
+          Requester: {{ requester_name }} ({{ requester_email }})
+          
+          Error Details:
+          {{ ansible_failed_result | to_nice_json }}
+          
+          Status: FAILED
+          ========================================
+        dest: "/var/log/zscaler-automation/{{ request_id }}_FAILED.log"
+        mode: '0640'
+      delegate_to: localhost
+
+    - name: Attempt to log out from Zscaler API (cleanup)
+      uri:
+        url: "{{ zscaler_admin_url }}/api/{{ zscaler_api_version }}/authenticatedSession"
+        method: DELETE
+        headers:
+          Cookie: "{{ zscaler_cookie | default('') }}"
+        status_code: [200, 204]
+        validate_certs: yes
+        timeout: "{{ zscaler_timeout }}"
+      ignore_errors: yes
+      when: zscaler_cookie is defined
+
+    - name: Display failure message
+      debug:
+        msg: |
+          ========================================
+          ❌ Zscaler Whitelist Automation FAILED
+          ========================================
+          Request ID: {{ request_id }}
+          ServiceNow Ticket: {{ servicenow_ticket }}
+          Please check logs for details
+          ========================================
+
+    - name: Fail the playbook
+      fail:
+        msg: "Zscaler whitelist automation failed. Check logs for details."
