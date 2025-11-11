@@ -1,0 +1,64 @@
+---
+# playbooks/servicenow_connection_test.yml
+- name: ServiceNow Connection Test
+  hosts: localhost
+  gather_facts: no
+  collections:
+    - servicenow.itsm
+  
+  vars:
+    snow_host: "{{ servicenow_instance }}"
+    snow_user: "{{ servicenow_username }}"
+    snow_pass: "{{ servicenow_password }}"
+  
+  tasks:
+    - name: Display connection details
+      debug:
+        msg:
+          - "========================================"
+          - "Testing ServiceNow Connection"
+          - "========================================"
+          - "Instance: {{ snow_host }}"
+          - "Username: {{ snow_user }}"
+          - "========================================"
+    
+    - name: Test 1 - Get ServiceNow incidents
+      servicenow.itsm.incident_info:
+        instance:
+          host: "{{ snow_host }}"
+          username: "{{ snow_user }}"
+          password: "{{ snow_pass }}"
+        query:
+          - state: IN new,in_progress,on_hold
+        limit: 5
+      register: incidents
+      
+    - name: Display incidents found
+      debug:
+        msg: 
+          - "✓ Connection Successful!"
+          - "Found {{ incidents.records | length }} incidents in ServiceNow"
+    
+    - name: Test 2 - Show incident details
+      debug:
+        msg: |
+          Incident Number: {{ item.number }}
+          Short Description: {{ item.short_description }}
+          Priority: {{ item.priority }}
+          State: {{ item.state }}
+      loop: "{{ incidents.records }}"
+      when: incidents.records | length > 0
+      loop_control:
+        label: "{{ item.number }}"
+    
+    - name: Connection Test Summary
+      debug:
+        msg:
+          - "========================================"
+          - "✓ ServiceNow Connection Test PASSED"
+          - "========================================"
+          - "Instance: {{ snow_host }}"
+          - "Incidents Found: {{ incidents.records | length }}"
+          - "API Access: Working"
+          - "Status: ✓ Ready for automation!"
+          - "========================================"

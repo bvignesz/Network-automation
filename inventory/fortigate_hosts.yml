@@ -1,0 +1,16 @@
+---
+# inventory/fortigate_hosts.yml
+all:
+  children:
+    fortigates:
+      hosts:
+        fortigate01:
+          ansible_host: "{{ fortigate_ip }}"
+      
+      vars:
+        ansible_connection: httpapi
+        ansible_network_os: fortinet.fortios.fortios
+        ansible_httpapi_use_ssl: yes
+        ansible_httpapi_validate_certs: no
+        ansible_httpapi_port: 443
+        vdom: "root"
