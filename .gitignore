@@ -1,0 +1,24 @@
+# Ansible
+*.retry
+*.pyc
+__pycache__/
+.ansible/
+collections/
+
+# Credentials (never commit these!)
+credentials.yml
+vault.yml
+.vault_pass
+*.pem
+*.key
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

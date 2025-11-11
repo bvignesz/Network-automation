@@ -1,0 +1,73 @@
+# playbooks/fortigate_get_interfaces.yml
+- name: Get FortiGate Interface IP Details (API Token Auth)
+  hosts: fortigates
+  gather_facts: no
+  collections:
+    - fortinet.fortios
+  
+  vars:
+    ansible_connection: httpapi
+    ansible_network_os: fortinet.fortios.fortios
+    ansible_httpapi_use_ssl: yes
+    ansible_httpapi_validate_certs: no
+    ansible_httpapi_port: 443
+    vdom: "root"
+  
+  tasks:
+    - name: Display connection info
+      debug:
+        msg: 
+          - "Connecting to: {{ ansible_host }}"
+          - "Using API Token authentication"
+          - "VDOM: {{ vdom }}"
+    
+    - name: Get system interface information
+      fortios_system_interface_info:
+        vdom: "{{ vdom }}"
+        access_token: "{{ fortigate_api_token }}"
+      register: interface_info
+    
+    - name: Display all interfaces
+      debug:
+        msg: "Found {{ interface_info.meta.results | length }} interfaces"
+    
+    - name: Show interface details with IP addresses
+      debug:
+        msg: |
+          ========================================
+          Interface: {{ item.name }}
+          IP Address: {{ item.ip | default('No IP configured') }}
+          Status: {{ item.status }}
+          Type: {{ item.type }}
+          VLAN ID: {{ item.vlanid | default('N/A') }}
+          ========================================
+      loop: "{{ interface_info.meta.results }}"
+      loop_control:
+        label: "{{ item.name }}"
+    
+    - name: Get system status
+      fortios_system_status_info:
+        vdom: "{{ vdom }}"
+        access_token: "{{ fortigate_api_token }}"
+      register: system_status
+    
+    - name: Display FortiGate system info
+      debug:
+        msg:
+          - "========================================="
+          - "FortiGate Device Information"
+          - "========================================="
+          - "Hostname: {{ system_status.meta.results.hostname }}"
+          - "Version: {{ system_status.meta.results.version }}"
+          - "Serial Number: {{ system_status.meta.results.serial }}"
+          - "========================================="
+    
+    - name: Get firewall policies
+      fortios_firewall_policy_info:
+        vdom: "{{ vdom }}"
+        access_token: "{{ fortigate_api_token }}"
+      register: fw_policies
+      
+    - name: Show firewall policies summary
+      debug:
+        msg: "Total firewall policies: {{ fw_policies.meta.results | length }}"
