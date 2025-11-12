@@ -22,3 +22,9 @@ vault.yml
 # OS files
 .DS_Store
 Thumbs.db
+# Ansible
+*.log
+*.retry
+logs/
+.vault_pass
+vault/credentials.yml

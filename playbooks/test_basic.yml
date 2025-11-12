@@ -1,0 +1,34 @@
+---
+- name: Basic Semaphore Test
+  hosts: localhost
+  gather_facts: yes
+  
+  tasks:
+    - name: Display system information
+      debug:
+        msg:
+          - "================================================"
+          - "  ✓ SEMAPHORE + ANSIBLE + GITHUB WORKING!"
+          - "================================================"
+          - "Server: {{ ansible_hostname }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Python: {{ ansible_python_version }}"
+          - "Ansible: {{ ansible_version.full }}"
+          - "Time: {{ ansible_date_time.iso8601 }}"
+          - "================================================"
+    
+    - name: Create test file
+      copy:
+        content: |
+          ======================================
+          SEMAPHORE TEST SUCCESS
+          ======================================
+          Created: {{ ansible_date_time.iso8601 }}
+          Server: {{ ansible_hostname }}
+          ======================================
+        dest: "/tmp/semaphore_test_{{ ansible_date_time.epoch }}.txt"
+      register: test_file
+    
+    - name: Show result
+      debug:
+        msg: "✓ Test file: {{ test_file.dest }}"

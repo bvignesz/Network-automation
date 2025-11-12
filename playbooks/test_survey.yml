@@ -1,0 +1,34 @@
+---
+- name: Test Survey Variables
+  hosts: localhost
+  gather_facts: no
+  
+  vars:
+    ticket_number: "{{ ticket | default('TEST-001') }}"
+    test_url: "{{ url | default('example.com') }}"
+    test_action: "{{ action | default('whitelist') }}"
+    
+  tasks:
+    - name: Display variables
+      debug:
+        msg:
+          - "================================================"
+          - "Ticket: {{ ticket_number }}"
+          - "URL: {{ test_url }}"
+          - "Action: {{ test_action }}"
+          - "================================================"
+    
+    - name: Create result file
+      copy:
+        content: |
+          Test Results
+          ============
+          Ticket: {{ ticket_number }}
+          URL: {{ test_url }}
+          Action: {{ test_action }}
+        dest: "/tmp/survey_{{ ticket_number }}.txt"
+      register: result
+    
+    - name: Show result
+      debug:
+        msg: "✓ Results: {{ result.dest }}"
