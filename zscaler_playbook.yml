@@ -1,0 +1,205 @@
+---
+- name: Zscaler URL Filtering Automation
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  
+  vars:
+    # Zscaler credentials from Semaphore Environment
+    zscaler_username: "{{ lookup('env', 'ZSCALER_USERNAME') }}"
+    zscaler_password: "{{ lookup('env', 'ZSCALER_PASSWORD') }}"
+    zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
+    zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscaler', true) }}"
+    
+    # Survey inputs from Semaphore UI
+    operation: "{{ operation | default('list', true) }}"
+    target_rule_name: "{{ rule_name | default('', true) }}"
+    url_to_block: "{{ url_to_block | default('', true) }}"
+    url_category_to_add: "{{ url_category | default('', true) }}"
+    rule_action: "{{ rule_action | default('', true) }}"
+    report_format: "{{ report_format | default('table', true) }}"
+    
+    # Paths
+    script_path: "{{ playbook_dir }}/zscaler_url_automation.py"
+    reports_dir: "{{ playbook_dir }}/reports"
+    
+  pre_tasks:
+    - name: Validate required environment variables
+      fail:
+        msg: "Missing required environment variable: {{ item }}"
+      when: lookup('env', item) == ''
+      loop:
+        - ZSCALER_USERNAME
+        - ZSCALER_PASSWORD
+        - ZSCALER_API_KEY
+      tags: always
+      
+    - name: Create reports directory
+      file:
+        path: "{{ reports_dir }}"
+        state: directory
+        mode: '0755'
+      tags: always
+      
+    - name: Validate Python dependencies
+      command: python3 -c "import zscaler"
+      register: python_check
+      failed_when: false
+      changed_when: false
+      tags: always
+      
+    - name: Install Python dependencies if needed
+      pip:
+        requirements: "{{ playbook_dir }}/requirements.txt"
+        executable: pip3
+      when: python_check.rc != 0
+      tags: always
+      
+  tasks:
+    # ==========================================
+    # TASK 1: List All Rules
+    # ==========================================
+    - name: List all URL filtering rules
+      command: >
+        python3 {{ script_path }}
+        --list-rules
+        --format {{ report_format }}
+      environment:
+        ZSCALER_USERNAME: "{{ zscaler_username }}"
+        ZSCALER_PASSWORD: "{{ zscaler_password }}"
+        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+      register: list_output
+      when: operation == 'list'
+      changed_when: false
+      tags:
+        - list
+        - always
+        
+    - name: Display list output
+      debug:
+        msg: "{{ list_output.stdout_lines }}"
+      when: operation == 'list' and list_output is defined
+      tags:
+        - list
+        - always
+        
+    # ==========================================
+    # TASK 2: Add URL Category to Rule
+    # ==========================================
+    - name: Validate inputs for add-category operation
+      fail:
+        msg: "Both --rule-name and --url-category are required for add-category operation"
+      when: 
+        - operation == 'add-category'
+        - (target_rule_name == '' or url_category_to_add == '')
+      tags: add-category
+      
+    - name: Add URL category to existing rule
+      command: >
+        python3 {{ script_path }}
+        --rule-name "{{ target_rule_name }}"
+        --add-category "{{ url_category_to_add }}"
+      environment:
+        ZSCALER_USERNAME: "{{ zscaler_username }}"
+        ZSCALER_PASSWORD: "{{ zscaler_password }}"
+        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+      register: add_category_output
+      when: operation == 'add-category'
+      tags: add-category
+      
+    - name: Display add-category output
+      debug:
+        msg: "{{ add_category_output.stdout_lines }}"
+      when: operation == 'add-category' and add_category_output is defined
+      tags: add-category
+      
+    # ==========================================
+    # TASK 3: Block URL (Add to Rule)
+    # ==========================================
+    - name: Validate inputs for block-url operation
+      fail:
+        msg: "Both --rule-name and --url-to-block are required for block-url operation"
+      when: 
+        - operation == 'block-url'
+        - (target_rule_name == '' or url_to_block == '')
+      tags: block-url
+      
+    - name: Block URL in specified rule
+      command: >
+        python3 {{ script_path }}
+        --rule-name "{{ target_rule_name }}"
+        --block-url "{{ url_to_block }}"
+      environment:
+        ZSCALER_USERNAME: "{{ zscaler_username }}"
+        ZSCALER_PASSWORD: "{{ zscaler_password }}"
+        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+      register: block_url_output
+      when: operation == 'block-url'
+      tags: block-url
+      
+    - name: Display block-url output
+      debug:
+        msg: "{{ block_url_output.stdout_lines }}"
+      when: operation == 'block-url' and block_url_output is defined
+      tags: block-url
+      
+    # ==========================================
+    # TASK 4: Update Rule Action
+    # ==========================================
+    - name: Validate inputs for update-action operation
+      fail:
+        msg: "Both --rule-name and --action are required for update-action operation"
+      when: 
+        - operation == 'update-action'
+        - (target_rule_name == '' or rule_action == '')
+      tags: update-action
+      
+    - name: Update rule action
+      command: >
+        python3 {{ script_path }}
+        --rule-name "{{ target_rule_name }}"
+        --action {{ rule_action }}
+      environment:
+        ZSCALER_USERNAME: "{{ zscaler_username }}"
+        ZSCALER_PASSWORD: "{{ zscaler_password }}"
+        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+      register: update_action_output
+      when: operation == 'update-action'
+      tags: update-action
+      
+    - name: Display update-action output
+      debug:
+        msg: "{{ update_action_output.stdout_lines }}"
+      when: operation == 'update-action' and update_action_output is defined
+      tags: update-action
+      
+  post_tasks:
+    - name: Find generated reports
+      find:
+        paths: "{{ reports_dir }}"
+        patterns: "zscaler_rules_*.csv,zscaler_rules_*.json"
+        age: "-1h"
+      register: recent_reports
+      when: report_format in ['csv', 'json']
+      tags: always
+      
+    - name: Display report locations
+      debug:
+        msg: "📄 Report saved: {{ item.path }}"
+      loop: "{{ recent_reports.files }}"
+      when: recent_reports is defined and recent_reports.files | length > 0
+      tags: always
+      
+    - name: Summary
+      debug:
+        msg: 
+          - "================================="
+          - "✅ Zscaler Automation Completed"
+          - "Operation: {{ operation }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+          - "================================="
+      tags: always
