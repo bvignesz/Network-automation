@@ -1,11 +1,11 @@
 ---
-- name: Zscaler URL Filtering Automation (Cloud Service API Key)
+- name: Zscaler URL Filtering Automation (Direct HTTP API)
   hosts: localhost
   connection: local
   gather_facts: false
   
   vars:
-    # Semaphore venv paths - CRITICAL for proper execution
+    # Semaphore venv paths
     venv_python: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3"
     venv_pip: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3 -m pip"
     
@@ -14,10 +14,9 @@
     
     # Zscaler credentials for Cloud Service API Key authentication
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
-    zscaler_cloud: "zscalerbeta"  # Hardcoded - change if using different cloud
     zscaler_base_url: "{{ lookup('env', 'ZSCALER_BASE_URL') | default('https://zsapi.zscalerbeta.net/api/v1', true) }}"
     
-    # Operation name mapping (converts display names to internal codes)
+    # Operation name mapping
     operation_map:
       "List All Rules": "list"
       "list": "list"
@@ -28,7 +27,7 @@
       "Update Rule Action": "update-action"
       "update-action": "update-action"
     
-    # Operation parameters (from Semaphore survey/form)
+    # Operation parameters
     selected_operation: "{{ operation_map[operation | default('list')] | default('list') }}"
     selected_rule_name: "{{ rule_name | default('') }}"
     selected_category_id: "{{ category_id | default('') }}"
@@ -38,16 +37,15 @@
 
   tasks:
     # ============================================================================
-    # PREREQUISITE CHECKS AND SETUP
+    # PREREQUISITE CHECKS
     # ============================================================================
     
     - name: Validate required credentials
       assert:
         that:
           - zscaler_api_key | length > 0
-          - zscaler_cloud | length > 0
-        fail_msg: "Missing required Zscaler credentials. Check ZSCALER_API_KEY and ZSCALER_CLOUD environment variables."
-        success_msg: "All required credentials are present"
+        fail_msg: "Missing required Zscaler API key. Check ZSCALER_API_KEY environment variable."
+        success_msg: "API key is present"
       tags: always
 
     - name: Check if automation script exists
@@ -62,37 +60,16 @@
       when: not script_stat.stat.exists
       tags: always
 
-    - name: Install Zscaler SDK
-      command: "{{ venv_pip }} install zscaler-sdk-python --upgrade --quiet"
+    - name: Install requests library (only dependency)
+      command: "{{ venv_pip }} install requests --quiet"
       register: pip_install
       changed_when: "'Successfully installed' in pip_install.stdout"
       failed_when: pip_install.rc != 0
       tags: always
 
-    - name: Verify Zscaler SDK
-      command: "{{ venv_python }} -c \"from zscaler.oneapi_client import LegacyZIAClient; print('SDK_OK')\""
-      register: sdk_check
-      failed_when: sdk_check.rc != 0
-      changed_when: false
-      tags: always
-
-    - name: Display SDK verification result
-      debug:
-        msg: "Zscaler SDK verified successfully"
-      when: sdk_check.rc == 0
-      tags: always
-
     # ============================================================================
     # OPERATION: LIST ALL RULES
     # ============================================================================
-    
-    - name: Debug environment variables
-      debug:
-        msg:
-          - "API Key length: {{ zscaler_api_key | length }}"
-          - "Cloud value: {{ zscaler_cloud }}"
-          - "Base URL: {{ zscaler_base_url }}"
-      tags: always
     
     - name: List all URL filtering rules
       command: >
@@ -102,7 +79,6 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: list_output
       when: selected_operation == 'list'
@@ -138,7 +114,6 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: add_category_output
       when: 
@@ -177,7 +152,6 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: block_url_output
       when:
@@ -217,7 +191,6 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: update_action_output
       when:
