@@ -14,6 +14,7 @@
     
     # Zscaler credentials for Cloud Service API Key authentication
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
+    zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscalerbeta', true) }}"
     zscaler_base_url: "{{ lookup('env', 'ZSCALER_BASE_URL') | default('https://zsapi.zscalerbeta.net/api/v1', true) }}"
     
     # Operation name mapping (converts display names to internal codes)
@@ -44,8 +45,8 @@
       assert:
         that:
           - zscaler_api_key | length > 0
-          - zscaler_base_url | length > 0
-        fail_msg: "Missing required Zscaler credentials. Check ZSCALER_API_KEY environment variable."
+          - zscaler_cloud | length > 0
+        fail_msg: "Missing required Zscaler credentials. Check ZSCALER_API_KEY and ZSCALER_CLOUD environment variables."
         success_msg: "All required credentials are present"
       tags: always
 
@@ -93,6 +94,7 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: list_output
       when: selected_operation == 'list'
@@ -128,6 +130,7 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: add_category_output
       when: 
@@ -166,6 +169,7 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: block_url_output
       when:
@@ -205,6 +209,7 @@
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
+        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
         ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: update_action_output
       when:
