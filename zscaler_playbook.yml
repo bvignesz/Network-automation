@@ -14,7 +14,7 @@
     
     # Zscaler credentials for Cloud Service API Key authentication
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
-    zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscalerbeta', true) }}"
+    zscaler_cloud: "zscalerbeta"  # Hardcoded - change if using different cloud
     zscaler_base_url: "{{ lookup('env', 'ZSCALER_BASE_URL') | default('https://zsapi.zscalerbeta.net/api/v1', true) }}"
     
     # Operation name mapping (converts display names to internal codes)
@@ -85,6 +85,14 @@
     # ============================================================================
     # OPERATION: LIST ALL RULES
     # ============================================================================
+    
+    - name: Debug environment variables
+      debug:
+        msg:
+          - "API Key length: {{ zscaler_api_key | length }}"
+          - "Cloud value: {{ zscaler_cloud }}"
+          - "Base URL: {{ zscaler_base_url }}"
+      tags: always
     
     - name: List all URL filtering rules
       command: >
