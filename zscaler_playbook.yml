@@ -2,119 +2,89 @@
 - name: Zscaler URL Filtering Automation
   hosts: localhost
   connection: local
-  gather_facts: yes
+  gather_facts: false
   
   vars:
+    # Semaphore venv paths - CRITICAL for proper execution
+    venv_python: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3"
+    venv_pip: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3 -m pip"
+    
+    # Script location
+    script_path: "/tmp/semaphore/project_1/repository_3_template_11/zscaler_url_automation.py"
+    
+    # Zscaler credentials (should be provided via Semaphore secrets)
     zscaler_username: "{{ lookup('env', 'ZSCALER_USERNAME') }}"
     zscaler_password: "{{ lookup('env', 'ZSCALER_PASSWORD') }}"
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
-    zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscalerbeta', true) }}"
+    zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscaler.net', true) }}"
     
-    raw_operation: "{{ operation | default('list', true) }}"
-    selected_rule_name: "{{ rule_name | default('', true) }}"
-    selected_url_to_block: "{{ block_url | default('', true) }}"
-    selected_url_category: "{{ url_category | default('', true) }}"
-    selected_rule_action: "{{ rule_action | default('', true) }}"
-    selected_report_format: "{{ report_format | default('table', true) }}"
-    
-    operation_map:
-      "list": "list"
-      "List All Rules": "list"
-      "add-category": "add-category"
-      "Add URL Category to Rule": "add-category"
-      "block-url": "block-url"
-      "Block URL": "block-url"
-      "update-action": "update-action"
-      "Update Rule Action": "update-action"
-    
-    selected_operation: "{{ operation_map[raw_operation] | default('list') }}"
-    
-    script_path: "{{ playbook_dir }}/zscaler_url_automation.py"
-    reports_dir: "{{ playbook_dir }}/reports"
-    
+    # Operation parameters (from Semaphore survey/form)
+    selected_operation: "{{ operation | default('list') }}"
+    selected_rule_name: "{{ rule_name | default('') }}"
+    selected_category_id: "{{ category_id | default('') }}"
+    selected_url_to_block: "{{ url_to_block | default('') }}"
+    selected_action: "{{ action | default('') }}"
+    selected_report_format: "{{ report_format | default('table') }}"
+
   tasks:
-    - name: DEBUG - Show ALL received variables
-      debug:
-        msg:
-          - "============= INPUT DEBUG ============="
-          - "Raw operation: '{{ raw_operation }}'"
-          - "Normalized operation: '{{ selected_operation }}'"
-          - "Rule name: '{{ selected_rule_name }}'"
-          - "URL to block: '{{ selected_url_to_block }}'"
-          - "URL category: '{{ selected_url_category }}'"
-          - "Rule action: '{{ selected_rule_action }}'"
-          - "Report format: '{{ selected_report_format }}'"
-          - "============= ENV DEBUG ============="
-          - "ZSCALER_USERNAME set: {{ zscaler_username | length > 0 }}"
-          - "ZSCALER_PASSWORD set: {{ zscaler_password | length > 0 }}"
-          - "ZSCALER_API_KEY set: {{ zscaler_api_key | length > 0 }}"
-          - "ZSCALER_CLOUD: '{{ zscaler_cloud }}'"
-      tags: always
+    # ============================================================================
+    # PREREQUISITE CHECKS AND SETUP
+    # ============================================================================
     
-    - name: Check if Python script exists
+    - name: Validate required credentials
+      assert:
+        that:
+          - zscaler_username | length > 0
+          - zscaler_password | length > 0
+          - zscaler_api_key | length > 0
+          - zscaler_cloud | length > 0
+        fail_msg: "Missing required Zscaler credentials. Check environment variables."
+        success_msg: "All required credentials are present"
+      tags: always
+
+    - name: Check if automation script exists
       stat:
         path: "{{ script_path }}"
       register: script_stat
       tags: always
-      
-    - name: DEBUG - Script check
-      debug:
-        msg: "Script exists: {{ script_stat.stat.exists }} at {{ script_path }}"
-      tags: always
-      
-    - name: Fail if script does not exist
+
+    - name: Fail if script is missing
       fail:
-        msg: "Python script not found at {{ script_path }}"
+        msg: "Automation script not found at {{ script_path }}"
       when: not script_stat.stat.exists
       tags: always
-    
-    - name: Validate required environment variables
-      fail:
-        msg: "Missing required environment variable: {{ item }}"
-      when: lookup('env', item) == ''
-      loop:
-        - ZSCALER_USERNAME
-        - ZSCALER_PASSWORD
-        - ZSCALER_API_KEY
-      tags: always
-      
-    - name: Create reports directory
-      file:
-        path: "{{ reports_dir }}"
-        state: directory
-        mode: '0755'
-      tags: always
-    
+
     - name: Install Zscaler SDK
-      command: pip3 install zscaler-sdk-python --upgrade --quiet
+      command: "{{ venv_pip }} install zscaler-sdk-python --upgrade --quiet"
       register: pip_install
-      changed_when: false
-      failed_when: false
+      changed_when: "'Successfully installed' in pip_install.stdout"
+      failed_when: pip_install.rc != 0
       tags: always
-      
+
     - name: Verify Zscaler SDK
-      command: python3 -c "from zscaler import ZIAClientHelper; print('SDK_OK')"
+      command: "{{ venv_python }} -c \"from zscaler import ZIAClientHelper; print('SDK_OK')\""
       register: sdk_check
-      failed_when: false
+      failed_when: sdk_check.rc != 0
       changed_when: false
       tags: always
-      
-    - name: DEBUG - SDK check result
+
+    - name: Display SDK verification result
       debug:
-        msg: "SDK check: rc={{ sdk_check.rc }}, stdout={{ sdk_check.stdout }}"
+        msg: "Zscaler SDK verified successfully"
+      when: sdk_check.rc == 0
       tags: always
 
-    - name: DEBUG - About to check operation for list
-      debug:
-        msg: "Checking if '{{ selected_operation }}' == 'list' : {{ selected_operation == 'list' }}"
-      tags: always
-
+    # ============================================================================
+    # OPERATION: LIST ALL RULES
+    # ============================================================================
+    
     - name: List all URL filtering rules
       command: >
-        python3 {{ script_path }}
+        {{ venv_python }} {{ script_path }}
         --list-rules
         --format {{ selected_report_format }}
       environment:
+        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_USERNAME: "{{ zscaler_username }}"
         ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
@@ -122,38 +92,36 @@
       register: list_output
       when: selected_operation == 'list'
       tags: always
-        
-    - name: Display list output
+
+    - name: Display rules list
       debug:
-        msg: "{{ list_output.stdout_lines | default(['No output from script']) }}"
+        msg: "{{ list_output.stdout_lines }}"
       when: 
         - selected_operation == 'list'
+        - list_output is defined
         - list_output.stdout_lines is defined
       tags: always
 
-    - name: Display list errors if any
-      debug:
-        msg: "STDERR: {{ list_output.stderr_lines | default(['No errors']) }}"
-      when: 
-        - selected_operation == 'list'
-        - list_output.stderr_lines is defined
-        - list_output.stderr_lines | length > 0
+    # ============================================================================
+    # OPERATION: ADD URL CATEGORY TO RULE
+    # ============================================================================
+    
+    - name: Validate parameters for add-category operation
+      assert:
+        that:
+          - selected_rule_name | length > 0
+          - selected_category_id | length > 0
+        fail_msg: "Both rule_name and category_id are required for add-category operation"
+      when: selected_operation == 'add-category'
       tags: always
-        
-    - name: Validate inputs for add-category operation
-      fail:
-        msg: "Both 'rule_name' and 'url_category' are required for add-category operation"
-      when: 
-        - selected_operation == 'add-category'
-        - (selected_rule_name | length == 0) or (selected_url_category | length == 0)
-      tags: always
-      
-    - name: Add URL category to existing rule
+
+    - name: Add URL category to rule
       command: >
-        python3 {{ script_path }}
+        {{ venv_python }} {{ script_path }}
         --rule-name "{{ selected_rule_name }}"
-        --add-category "{{ selected_url_category }}"
+        --add-category "{{ selected_category_id }}"
       environment:
+        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_USERNAME: "{{ zscaler_username }}"
         ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
@@ -162,116 +130,114 @@
       when: 
         - selected_operation == 'add-category'
         - selected_rule_name | length > 0
-        - selected_url_category | length > 0
+        - selected_category_id | length > 0
       tags: always
-      
-    - name: Display add-category output
+
+    - name: Display add category result
       debug:
-        msg: "{{ add_category_output.stdout_lines | default(['No output']) }}"
+        msg: "{{ add_category_output.stdout_lines }}"
       when: 
         - selected_operation == 'add-category'
+        - add_category_output is defined
         - add_category_output.stdout_lines is defined
       tags: always
-      
-    - name: DEBUG - Block URL conditions
-      debug:
-        msg:
-          - "operation == 'block-url': {{ selected_operation == 'block-url' }}"
-          - "rule_name length > 0: {{ selected_rule_name | length > 0 }}"
-          - "url_to_block length > 0: {{ selected_url_to_block | length > 0 }}"
+
+    # ============================================================================
+    # OPERATION: BLOCK URL IN SPECIFIC RULE
+    # ============================================================================
+    
+    - name: Validate parameters for block-url operation
+      assert:
+        that:
+          - selected_rule_name | length > 0
+          - selected_url_to_block | length > 0
+        fail_msg: "Both rule_name and url_to_block are required for block-url operation"
       when: selected_operation == 'block-url'
       tags: always
-      
-    - name: Validate inputs for block-url operation
-      fail:
-        msg: "Both 'rule_name' and 'block_url' are required. Got rule_name='{{ selected_rule_name }}', block_url='{{ selected_url_to_block }}'"
-      when: 
-        - selected_operation == 'block-url'
-        - (selected_rule_name | length == 0) or (selected_url_to_block | length == 0)
-      tags: always
-      
+
     - name: Block URL in specified rule
       command: >
-        python3 {{ script_path }}
+        {{ venv_python }} {{ script_path }}
         --rule-name "{{ selected_rule_name }}"
         --block-url "{{ selected_url_to_block }}"
       environment:
+        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_USERNAME: "{{ zscaler_username }}"
         ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
         ZSCALER_CLOUD: "{{ zscaler_cloud }}"
       register: block_url_output
-      when: 
+      when:
         - selected_operation == 'block-url'
         - selected_rule_name | length > 0
         - selected_url_to_block | length > 0
       tags: always
-      
-    - name: Display block-url output
+
+    - name: Display block URL result
       debug:
-        msg: "{{ block_url_output.stdout_lines | default(['No output']) }}"
+        msg: "{{ block_url_output.stdout_lines }}"
       when: 
         - selected_operation == 'block-url'
+        - block_url_output is defined
         - block_url_output.stdout_lines is defined
       tags: always
-      
-    - name: Validate inputs for update-action operation
-      fail:
-        msg: "Both 'rule_name' and 'rule_action' are required for update-action operation"
-      when: 
-        - selected_operation == 'update-action'
-        - (selected_rule_name | length == 0) or (selected_rule_action | length == 0)
+
+    # ============================================================================
+    # OPERATION: UPDATE RULE ACTION
+    # ============================================================================
+    
+    - name: Validate parameters for update-action operation
+      assert:
+        that:
+          - selected_rule_name | length > 0
+          - selected_action | length > 0
+          - selected_action in ['ALLOW', 'BLOCK', 'CAUTION']
+        fail_msg: "Both rule_name and valid action (ALLOW/BLOCK/CAUTION) are required for update-action operation"
+      when: selected_operation == 'update-action'
       tags: always
-      
+
     - name: Update rule action
       command: >
-        python3 {{ script_path }}
+        {{ venv_python }} {{ script_path }}
         --rule-name "{{ selected_rule_name }}"
-        --action {{ selected_rule_action }}
+        --update-action "{{ selected_action }}"
       environment:
+        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZSCALER_USERNAME: "{{ zscaler_username }}"
         ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
         ZSCALER_CLOUD: "{{ zscaler_cloud }}"
       register: update_action_output
-      when: 
+      when:
         - selected_operation == 'update-action'
         - selected_rule_name | length > 0
-        - selected_rule_action | length > 0
+        - selected_action | length > 0
       tags: always
-      
-    - name: Display update-action output
+
+    - name: Display update action result
       debug:
-        msg: "{{ update_action_output.stdout_lines | default(['No output']) }}"
+        msg: "{{ update_action_output.stdout_lines }}"
       when: 
         - selected_operation == 'update-action'
+        - update_action_output is defined
         - update_action_output.stdout_lines is defined
       tags: always
-      
-    - name: Find generated reports
-      find:
-        paths: "{{ reports_dir }}"
-        patterns: "zscaler_rules_*.csv,zscaler_rules_*.json"
-        age: "-1h"
-      register: recent_reports
-      when: selected_report_format in ['csv', 'json']
-      tags: always
-      
-    - name: Display report locations
+
+    # ============================================================================
+    # FINAL SUMMARY
+    # ============================================================================
+    
+    - name: Operation summary
       debug:
-        msg: "Report saved: {{ item.path }}"
-      loop: "{{ recent_reports.files | default([]) }}"
-      when: 
-        - recent_reports.files is defined
-        - recent_reports.files | length > 0
-      tags: always
-      
-    - name: Summary
-      debug:
-        msg: 
-          - "================================="
-          - "Zscaler Automation Completed"
-          - "Operation: {{ selected_operation }}"
-          - "Timestamp: {{ ansible_date_time.iso8601 }}"
-          - "================================="
+        msg: |
+          ========================================
+          Zscaler URL Filtering Automation Summary
+          ========================================
+          Operation: {{ selected_operation }}
+          Rule Name: {{ selected_rule_name | default('N/A') }}
+          Category ID: {{ selected_category_id | default('N/A') }}
+          URL to Block: {{ selected_url_to_block | default('N/A') }}
+          Action: {{ selected_action | default('N/A') }}
+          Status: {% if (list_output is defined and list_output.rc == 0) or (add_category_output is defined and add_category_output.rc == 0) or (block_url_output is defined and block_url_output.rc == 0) or (update_action_output is defined and update_action_output.rc == 0) %}SUCCESS{% else %}COMPLETED{% endif %}
+          ========================================
       tags: always
