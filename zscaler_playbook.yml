@@ -1,7 +1,3 @@
-## Clean Playbook File
-
-Here's the complete, clean playbook - copy this **exactly** (no extra characters):
-```yaml
 ---
 - name: Zscaler URL Filtering Automation
   hosts: localhost
@@ -212,6 +208,3 @@ Here's the complete, clean playbook - copy this **exactly** (no extra characters
           - "Timestamp: {{ ansible_date_time.iso8601 }}"
           - "================================="
       tags: always
-```
-
----
