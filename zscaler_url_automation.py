@@ -52,6 +52,7 @@ class ZscalerURLAutomation:
         """Initialize Zscaler client with Cloud Service API Key from environment variables"""
         self.api_key = os.getenv('ZSCALER_API_KEY')
         self.base_url = os.getenv('ZSCALER_BASE_URL', 'https://zsapi.zscalerbeta.net/api/v1')
+        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscalerbeta')
         
         # Validate credentials
         if not self.api_key:
@@ -60,12 +61,13 @@ class ZscalerURLAutomation:
         
         logger.info(f"🔐 Authenticating to Zscaler using Cloud Service API Key...")
         logger.info(f"📍 Base URL: {self.base_url}")
+        logger.info(f"☁️  Cloud: {self.cloud}")
         
         try:
             # Initialize ZIA client with Cloud Service API Key
             config = {
                 "apiKey": self.api_key,
-                "baseUrl": self.base_url
+                "cloud": self.cloud
             }
             
             self.client = LegacyZIAClient(config)
