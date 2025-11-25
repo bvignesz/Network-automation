@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 Zscaler URL Filtering Automation Script
-Manages URL filtering rules in Zscaler Internet Access (ZIA)
-Uses Cloud Service API Key authentication
+Uses direct HTTP API calls with Cloud Service API Key
 """
 
 import os
 import sys
 import logging
-import subprocess
 import argparse
+import requests
 from typing import Optional, List, Dict, Any
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -19,62 +19,146 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import zscaler SDK with proper fallback handling
-try:
-    from zscaler.oneapi_client import LegacyZIAClient
-    logger.info("✅ Successfully imported LegacyZIAClient from zscaler")
-except ImportError as e:
-    logger.warning(f"⚠️ Import failed: {e}")
-    logger.info("📦 Attempting to install zscaler-sdk-python...")
-    
-    try:
-        # Install the SDK using the current Python interpreter
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", 
-            "zscaler-sdk-python", "--upgrade", "--quiet"
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info("✅ Successfully installed zscaler-sdk-python")
-        
-        # Try importing again after installation
-        from zscaler.oneapi_client import LegacyZIAClient
-        logger.info("✅ Import successful after installation")
-            
-    except (subprocess.CalledProcessError, ImportError) as install_error:
-        logger.error(f"❌ Failed to install or import SDK: {install_error}")
-        logger.error("❌ Zscaler SDK not installed. Run: pip install zscaler-sdk-python")
-        sys.exit(1)
 
-
-class ZscalerURLAutomation:
-    """Handles Zscaler URL filtering automation operations using Cloud Service API Key"""
+class ZscalerAPIClient:
+    """Direct HTTP API client for Zscaler using Cloud Service API Key"""
     
     def __init__(self):
-        """Initialize Zscaler client with Cloud Service API Key from environment variables"""
+        """Initialize Zscaler API client with Cloud Service API Key"""
         self.api_key = os.getenv('ZSCALER_API_KEY')
         self.base_url = os.getenv('ZSCALER_BASE_URL', 'https://zsapi.zscalerbeta.net/api/v1')
-        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscalerbeta')
         
         # Validate credentials
         if not self.api_key:
             logger.error("❌ Missing required API key. Set ZSCALER_API_KEY environment variable")
             sys.exit(1)
         
-        logger.info(f"🔐 Authenticating to Zscaler using Cloud Service API Key...")
+        # Remove trailing slash from base URL if present
+        self.base_url = self.base_url.rstrip('/')
+        
+        logger.info(f"🔐 Initializing Zscaler API client...")
         logger.info(f"📍 Base URL: {self.base_url}")
-        logger.info(f"☁️  Cloud: {self.cloud}")
+        logger.info(f"🔑 API Key length: {len(self.api_key)}")
+        
+        # Set up session with headers
+        self.session = requests.Session()
+        self.session.headers.update({
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'auth-type': 'cloudkey',
+            'cloudkey': self.api_key
+        })
+        
+        # Test the connection
+        if not self._test_connection():
+            logger.error("❌ Failed to connect to Zscaler API")
+            sys.exit(1)
+        
+        logger.info("✅ Successfully connected to Zscaler API")
+    
+    def _test_connection(self) -> bool:
+        """Test API connectivity"""
+        try:
+            logger.info("🔍 Testing API connection...")
+            response = self.session.get(f"{self.base_url}/urlFilteringRules")
+            
+            if response.status_code == 200:
+                return True
+            elif response.status_code == 401:
+                logger.error("❌ Authentication failed - Invalid API key")
+                return False
+            elif response.status_code == 403:
+                logger.error("❌ Access forbidden - Check API key permissions")
+                return False
+            else:
+                logger.error(f"❌ Unexpected response: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Connection test failed: {e}")
+            return False
+    
+    def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> tuple:
+        """
+        Make an API request
+        
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE)
+            endpoint: API endpoint (without base URL)
+            data: Request payload for POST/PUT
+            
+        Returns:
+            Tuple of (response_data, error)
+        """
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
         
         try:
-            # Initialize ZIA client with Cloud Service API Key
-            config = {
-                "apiKey": self.api_key,
-                "cloud": self.cloud
-            }
+            if method.upper() == 'GET':
+                response = self.session.get(url)
+            elif method.upper() == 'POST':
+                response = self.session.post(url, json=data)
+            elif method.upper() == 'PUT':
+                response = self.session.put(url, json=data)
+            elif method.upper() == 'DELETE':
+                response = self.session.delete(url)
+            else:
+                return None, f"Unsupported HTTP method: {method}"
             
-            self.client = LegacyZIAClient(config)
-            logger.info("✅ Authentication successful")
+            if response.status_code in [200, 201, 204]:
+                return response.json() if response.text else {}, None
+            else:
+                error_msg = f"API Error: {response.status_code}"
+                try:
+                    error_detail = response.json()
+                    error_msg += f" - {json.dumps(error_detail)}"
+                except:
+                    error_msg += f" - {response.text}"
+                return None, error_msg
+                
         except Exception as e:
-            logger.error(f"❌ Authentication failed: {e}")
-            sys.exit(1)
+            return None, str(e)
+    
+    def list_rules(self) -> tuple:
+        """
+        List all URL filtering rules
+        
+        Returns:
+            Tuple of (rules_list, error)
+        """
+        logger.info("📋 Fetching URL filtering rules...")
+        return self._make_request('GET', 'urlFilteringRules')
+    
+    def get_rule(self, rule_id: str) -> tuple:
+        """
+        Get a specific rule by ID
+        
+        Args:
+            rule_id: Rule ID
+            
+        Returns:
+            Tuple of (rule_data, error)
+        """
+        return self._make_request('GET', f'urlFilteringRules/{rule_id}')
+    
+    def update_rule(self, rule_id: str, rule_data: Dict) -> tuple:
+        """
+        Update a rule
+        
+        Args:
+            rule_id: Rule ID
+            rule_data: Updated rule data
+            
+        Returns:
+            Tuple of (updated_rule, error)
+        """
+        return self._make_request('PUT', f'urlFilteringRules/{rule_id}', rule_data)
+
+
+class ZscalerURLAutomation:
+    """Handles Zscaler URL filtering automation operations"""
+    
+    def __init__(self):
+        """Initialize automation with API client"""
+        self.client = ZscalerAPIClient()
     
     def list_rules(self, format_type: str = "table") -> None:
         """
@@ -83,71 +167,58 @@ class ZscalerURLAutomation:
         Args:
             format_type: Output format (table, json, or simple)
         """
-        logger.info("📋 Fetching URL filtering rules...")
+        rules, error = self.client.list_rules()
         
-        try:
-            rules, _, err = self.client.url_filtering_rules.list_rules()
-            
-            if err:
-                logger.error(f"❌ Error fetching rules: {err}")
-                sys.exit(1)
-            
-            if not rules:
-                logger.warning("⚠️ No URL filtering rules found")
-                return
-            
-            logger.info(f"✅ Found {len(rules)} URL filtering rules")
-            
-            if format_type == "json":
-                import json
-                print(json.dumps(rules, indent=2, default=str))
-            elif format_type == "simple":
-                for rule in rules:
-                    print(f"{rule.get('id')} - {rule.get('name')} - {rule.get('action', 'N/A')}")
-            else:  # table format
-                print("\n" + "="*120)
-                print(f"{'ID':<10} {'Rule Name':<40} {'Action':<15} {'State':<10} {'Order':<8}")
-                print("="*120)
-                for rule in rules:
-                    rule_id = rule.get('id', 'N/A')
-                    name = rule.get('name', 'N/A')[:38]
-                    action = rule.get('action', 'N/A')
-                    state = rule.get('state', 'N/A')
-                    order = rule.get('order', 'N/A')
-                    print(f"{rule_id:<10} {name:<40} {action:<15} {state:<10} {order:<8}")
-                print("="*120 + "\n")
-                
-        except Exception as e:
-            logger.error(f"❌ Failed to list rules: {e}")
+        if error:
+            logger.error(f"❌ Failed to list rules: {error}")
             sys.exit(1)
+        
+        if not rules:
+            logger.warning("⚠️ No URL filtering rules found")
+            return
+        
+        logger.info(f"✅ Found {len(rules)} URL filtering rules")
+        
+        if format_type == "json":
+            print(json.dumps(rules, indent=2, default=str))
+        elif format_type == "simple":
+            for rule in rules:
+                print(f"{rule.get('id')} - {rule.get('name')} - {rule.get('action', 'N/A')}")
+        else:  # table format
+            print("\n" + "="*120)
+            print(f"{'ID':<10} {'Rule Name':<40} {'Action':<15} {'State':<10} {'Order':<8}")
+            print("="*120)
+            for rule in rules:
+                rule_id = rule.get('id', 'N/A')
+                name = rule.get('name', 'N/A')[:38]
+                action = rule.get('action', 'N/A')
+                state = rule.get('state', 'N/A')
+                order = rule.get('order', 'N/A')
+                print(f"{rule_id:<10} {name:<40} {action:<15} {state:<10} {order:<8}")
+            print("="*120 + "\n")
     
     def get_rule_by_name(self, rule_name: str) -> Optional[Dict[str, Any]]:
         """
-        Get a rule by its name
+        Get a rule by its name or ID
         
         Args:
-            rule_name: Name of the rule to find
+            rule_name: Name or ID of the rule
             
         Returns:
             Rule dictionary if found, None otherwise
         """
-        try:
-            rules, _, err = self.client.url_filtering_rules.list_rules()
-            
-            if err:
-                logger.error(f"❌ Error fetching rules: {err}")
-                return None
-            
-            for rule in rules:
-                if rule.get('name') == rule_name or str(rule.get('id')) == rule_name:
-                    return rule
-            
-            logger.error(f"❌ Rule '{rule_name}' not found")
+        rules, error = self.client.list_rules()
+        
+        if error:
+            logger.error(f"❌ Failed to get rules: {error}")
             return None
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to get rule: {e}")
-            return None
+        
+        for rule in rules:
+            if rule.get('name') == rule_name or str(rule.get('id')) == rule_name:
+                return rule
+        
+        logger.error(f"❌ Rule '{rule_name}' not found")
+        return None
     
     def add_category_to_rule(self, rule_name: str, category_id: str) -> bool:
         """
@@ -167,38 +238,26 @@ class ZscalerURLAutomation:
         if not rule:
             return False
         
-        try:
-            rule_id = rule['id']
-            current_categories = rule.get('urlCategories', [])
-            
-            # Check if category already exists
-            if category_id in current_categories:
-                logger.warning(f"⚠️ Category {category_id} already exists in rule '{rule_name}'")
-                return True
-            
-            # Add the new category
-            updated_categories = current_categories + [category_id]
-            
-            # Update the rule
-            update_data = {
-                'urlCategories': updated_categories
-            }
-            
-            _, _, err = self.client.url_filtering_rules.update_rule(
-                rule_id=rule_id,
-                **update_data
-            )
-            
-            if err:
-                logger.error(f"❌ Failed to update rule: {err}")
-                return False
-            
-            logger.info(f"✅ Successfully added category {category_id} to rule '{rule_name}'")
+        rule_id = rule['id']
+        current_categories = rule.get('urlCategories', [])
+        
+        # Check if category already exists
+        if category_id in current_categories:
+            logger.warning(f"⚠️ Category {category_id} already exists in rule '{rule_name}'")
             return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to add category: {e}")
+        
+        # Add the new category
+        rule['urlCategories'] = current_categories + [category_id]
+        
+        # Update the rule
+        updated_rule, error = self.client.update_rule(rule_id, rule)
+        
+        if error:
+            logger.error(f"❌ Failed to update rule: {error}")
             return False
+        
+        logger.info(f"✅ Successfully added category {category_id} to rule '{rule_name}'")
+        return True
     
     def block_url_in_rule(self, rule_name: str, url: str) -> bool:
         """
@@ -218,38 +277,26 @@ class ZscalerURLAutomation:
         if not rule:
             return False
         
-        try:
-            rule_id = rule['id']
-            current_urls = rule.get('blockOverride', [])
-            
-            # Check if URL already exists
-            if url in current_urls:
-                logger.warning(f"⚠️ URL '{url}' is already blocked in rule '{rule_name}'")
-                return True
-            
-            # Add the new URL
-            updated_urls = current_urls + [url]
-            
-            # Update the rule
-            update_data = {
-                'blockOverride': updated_urls
-            }
-            
-            _, _, err = self.client.url_filtering_rules.update_rule(
-                rule_id=rule_id,
-                **update_data
-            )
-            
-            if err:
-                logger.error(f"❌ Failed to update rule: {err}")
-                return False
-            
-            logger.info(f"✅ Successfully blocked URL '{url}' in rule '{rule_name}'")
+        rule_id = rule['id']
+        current_urls = rule.get('blockOverride', [])
+        
+        # Check if URL already exists
+        if url in current_urls:
+            logger.warning(f"⚠️ URL '{url}' is already blocked in rule '{rule_name}'")
             return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to block URL: {e}")
+        
+        # Add the new URL
+        rule['blockOverride'] = current_urls + [url]
+        
+        # Update the rule
+        updated_rule, error = self.client.update_rule(rule_id, rule)
+        
+        if error:
+            logger.error(f"❌ Failed to update rule: {error}")
             return False
+        
+        logger.info(f"✅ Successfully blocked URL '{url}' in rule '{rule_name}'")
+        return True
     
     def update_rule_action(self, rule_name: str, action: str) -> bool:
         """
@@ -275,35 +322,24 @@ class ZscalerURLAutomation:
         if not rule:
             return False
         
-        try:
-            rule_id = rule['id']
-            
-            # Update the rule action
-            update_data = {
-                'action': action.upper()
-            }
-            
-            _, _, err = self.client.url_filtering_rules.update_rule(
-                rule_id=rule_id,
-                **update_data
-            )
-            
-            if err:
-                logger.error(f"❌ Failed to update rule: {err}")
-                return False
-            
-            logger.info(f"✅ Successfully updated rule '{rule_name}' action to '{action}'")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to update rule action: {e}")
+        rule_id = rule['id']
+        rule['action'] = action.upper()
+        
+        # Update the rule
+        updated_rule, error = self.client.update_rule(rule_id, rule)
+        
+        if error:
+            logger.error(f"❌ Failed to update rule: {error}")
             return False
+        
+        logger.info(f"✅ Successfully updated rule '{rule_name}' action to '{action}'")
+        return True
 
 
 def main():
     """Main entry point for the script"""
     parser = argparse.ArgumentParser(
-        description='Zscaler URL Filtering Automation (Cloud Service API Key)',
+        description='Zscaler URL Filtering Automation (Direct HTTP API)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
