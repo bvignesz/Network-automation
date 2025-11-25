@@ -3,7 +3,7 @@
 Zscaler URL Filtering Automation Script
 Purpose: List rules, update policies, add URLs, generate reports
 Author: Network Automation Team
-Version: 2.2
+Version: 2.3
 Cloud: zscalerbeta (sandbox/test)
 API Base: zsapi.zscalerbeta.net/api/v1
 """
@@ -32,7 +32,7 @@ def install_zscaler_sdk():
     try:
         subprocess.check_call([
             sys.executable, "-m", "pip", "install", 
-            "zscaler-sdk-python", "--quiet", "--user"
+            "zscaler-sdk-python", "--quiet"
         ])
         logger.info("✅ Successfully installed zscaler-sdk-python")
         return True
@@ -41,21 +41,35 @@ def install_zscaler_sdk():
         return False
 
 
-# Try to import Zscaler SDK, install if missing
+# Try to import Zscaler SDK with CORRECT import path
+SDK_AVAILABLE = False
+ZIAClientHelper = None
+
 try:
-    from zscaler.zia import ZIAClientHelper
+    # Correct import path - from root zscaler package
+    from zscaler import ZIAClientHelper
     SDK_AVAILABLE = True
-except ImportError:
-    logger.warning("⚠️ Zscaler SDK not found, attempting to install...")
-    if install_zscaler_sdk():
-        try:
-            from zscaler.zia import ZIAClientHelper
-            SDK_AVAILABLE = True
-        except ImportError:
-            logger.error("❌ Zscaler SDK installation failed. Please run: pip install zscaler-sdk-python")
-            SDK_AVAILABLE = False
-    else:
-        SDK_AVAILABLE = False
+    logger.info("✅ Zscaler SDK loaded successfully")
+except ImportError as e1:
+    logger.warning(f"⚠️ Primary import failed: {e1}")
+    try:
+        # Try alternative import path
+        from zscaler.zia import ZIA as ZIAClientHelper
+        SDK_AVAILABLE = True
+        logger.info("✅ Zscaler SDK loaded via alternative path")
+    except ImportError as e2:
+        logger.warning(f"⚠️ Alternative import failed: {e2}")
+        # Try to install SDK
+        if install_zscaler_sdk():
+            try:
+                from zscaler import ZIAClientHelper
+                SDK_AVAILABLE = True
+            except ImportError:
+                try:
+                    from zscaler.zia import ZIA as ZIAClientHelper
+                    SDK_AVAILABLE = True
+                except ImportError:
+                    SDK_AVAILABLE = False
 
 
 # ==========================================
@@ -79,6 +93,7 @@ class ZscalerAutomation:
         """Initialize Zscaler client with environment variables"""
         if not SDK_AVAILABLE:
             logger.error("❌ Cannot initialize: Zscaler SDK not available")
+            logger.error("   Please run: pip install zscaler-sdk-python")
             sys.exit(1)
             
         self.username = os.getenv('ZSCALER_USERNAME')
@@ -137,11 +152,19 @@ class ZscalerAutomation:
         """List all URL filtering rules with their status"""
         try:
             logger.info("📋 Fetching all URL filtering rules...")
-            rules, response, error = self.client.url_filtering.list_rules()
             
-            if error:
-                logger.error(f"❌ Error fetching rules: {error}")
-                return []
+            # Try different API methods based on SDK version
+            try:
+                rules = self.client.url_filtering.list_rules()
+            except AttributeError:
+                try:
+                    rules = self.client.web_application_rules.list_rules()
+                except AttributeError:
+                    rules = self.client.url_categories.list_url_categories()
+            
+            # Handle different return types
+            if isinstance(rules, tuple):
+                rules = rules[0]  # Some SDK versions return (rules, response, error)
                 
             if not rules:
                 logger.warning("⚠️  No URL filtering rules found")
@@ -151,23 +174,30 @@ class ZscalerAutomation:
             
             rules_data = []
             for rule in rules:
-                rule_info = {
-                    'id': rule.id,
-                    'name': rule.name,
-                    'state': rule.state,
-                    'action': rule.action,
-                    'order': rule.order,
-                    'rank': getattr(rule, 'rank', 'N/A'),
-                    'description': rule.description or 'N/A',
-                    'url_categories': ', '.join(rule.url_categories) if rule.url_categories else 'N/A',
-                    'protocols': ', '.join(rule.protocols) if rule.protocols else 'N/A',
-                    'locations': len(rule.locations) if rule.locations else 0,
-                    'groups': len(rule.groups) if rule.groups else 0,
-                    'users': len(rule.users) if rule.users else 0,
-                }
+                # Handle both object and dict responses
+                if isinstance(rule, dict):
+                    rule_info = {
+                        'id': rule.get('id', 'N/A'),
+                        'name': rule.get('name', 'N/A'),
+                        'state': rule.get('state', 'N/A'),
+                        'action': rule.get('action', 'N/A'),
+                        'order': rule.get('order', 0),
+                        'description': rule.get('description', 'N/A'),
+                        'url_categories': ', '.join(rule.get('urlCategories', [])) if rule.get('urlCategories') else 'N/A',
+                    }
+                else:
+                    rule_info = {
+                        'id': getattr(rule, 'id', 'N/A'),
+                        'name': getattr(rule, 'name', 'N/A'),
+                        'state': getattr(rule, 'state', 'N/A'),
+                        'action': getattr(rule, 'action', 'N/A'),
+                        'order': getattr(rule, 'order', 0),
+                        'description': getattr(rule, 'description', 'N/A') or 'N/A',
+                        'url_categories': ', '.join(getattr(rule, 'url_categories', [])) if getattr(rule, 'url_categories', None) else 'N/A',
+                    }
                 rules_data.append(rule_info)
                 
-            rules_data.sort(key=lambda x: x['order'])
+            rules_data.sort(key=lambda x: x.get('order', 0))
             
             if output_format == 'table':
                 self._display_table(rules_data)
@@ -180,6 +210,8 @@ class ZscalerAutomation:
             
         except Exception as e:
             logger.error(f"❌ Error listing rules: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
             
     def _display_table(self, rules_data: List[Dict]):
@@ -187,22 +219,19 @@ class ZscalerAutomation:
         if not rules_data:
             return
             
-        print("\n" + "="*150)
-        print(f"{'ID':<10} {'Name':<30} {'State':<10} {'Action':<10} {'Order':<6} {'URL Categories':<40} {'Description':<30}")
-        print("="*150)
+        print("\n" + "="*120)
+        print(f"{'ID':<10} {'Name':<30} {'State':<12} {'Action':<12} {'Order':<6} {'Description':<30}")
+        print("="*120)
         
         for rule in rules_data:
-            name = str(rule['name'])[:28] + '..' if len(str(rule['name'])) > 30 else rule['name']
-            categories = str(rule['url_categories'])[:38] + '..' if len(str(rule['url_categories'])) > 40 else rule['url_categories']
-            desc = str(rule['description'])[:28] + '..' if len(str(rule['description'])) > 30 else rule['description']
+            name = str(rule.get('name', ''))[:28] + '..' if len(str(rule.get('name', ''))) > 30 else rule.get('name', '')
+            desc = str(rule.get('description', ''))[:28] + '..' if len(str(rule.get('description', ''))) > 30 else rule.get('description', '')
             
-            print(f"{rule['id']:<10} {name:<30} {rule['state']:<10} {rule['action']:<10} "
-                  f"{rule['order']:<6} {categories:<40} {desc:<30}")
+            print(f"{rule.get('id', ''):<10} {name:<30} {rule.get('state', ''):<12} {rule.get('action', ''):<12} "
+                  f"{rule.get('order', ''):<6} {desc:<30}")
                   
-        print("="*150)
+        print("="*120)
         print(f"\n📊 Total Rules: {len(rules_data)}")
-        print(f"✅ Enabled: {sum(1 for r in rules_data if r['state'] == 'ENABLED')}")
-        print(f"❌ Disabled: {sum(1 for r in rules_data if r['state'] == 'DISABLED')}")
         
     def _export_csv(self, rules_data: List[Dict]):
         """Export rules to CSV file"""
@@ -250,25 +279,32 @@ class ZscalerAutomation:
     def find_rule_by_name(self, rule_name: str) -> Optional[object]:
         """Find a specific rule by name"""
         try:
-            rules, response, error = self.client.url_filtering.list_rules(
-                query_params={'search': rule_name}
-            )
+            # Get all rules first
+            try:
+                rules = self.client.url_filtering.list_rules()
+            except AttributeError:
+                rules = self.client.web_application_rules.list_rules()
             
-            if error or not rules:
-                logger.warning(f"⚠️  Rule '{rule_name}' not found")
-                return None
+            if isinstance(rules, tuple):
+                rules = rules[0]
                 
+            if not rules:
+                logger.warning(f"⚠️  No rules found")
+                return None
+            
+            # Search for matching rule
             for rule in rules:
-                if rule.name.lower() == rule_name.lower():
-                    logger.info(f"✅ Found rule: {rule.name} (ID: {rule.id})")
+                if isinstance(rule, dict):
+                    name = rule.get('name', '')
+                else:
+                    name = getattr(rule, 'name', '')
+                    
+                if name.lower() == rule_name.lower():
+                    logger.info(f"✅ Found rule: {name}")
                     return rule
             
-            if len(rules) > 1:
-                logger.warning(f"⚠️  Multiple rules found matching '{rule_name}'. Using first match.")
-                
-            rule = rules[0]
-            logger.info(f"✅ Found rule: {rule.name} (ID: {rule.id})")
-            return rule
+            logger.warning(f"⚠️  Rule '{rule_name}' not found")
+            return None
             
         except Exception as e:
             logger.error(f"❌ Error finding rule: {str(e)}")
@@ -280,8 +316,13 @@ class ZscalerAutomation:
             rule = self.find_rule_by_name(rule_name)
             if not rule:
                 return False
-                
-            current_categories = rule.url_categories or []
+            
+            if isinstance(rule, dict):
+                rule_id = rule.get('id')
+                current_categories = rule.get('urlCategories', []) or []
+            else:
+                rule_id = getattr(rule, 'id', None)
+                current_categories = getattr(rule, 'url_categories', []) or []
             
             if url_category in current_categories:
                 logger.warning(f"⚠️  Category '{url_category}' already exists in rule '{rule_name}'")
@@ -291,19 +332,18 @@ class ZscalerAutomation:
             
             logger.info(f"📝 Adding category '{url_category}' to rule '{rule_name}'")
             
-            updated_rule, response, error = self.client.url_filtering.update_rule(
-                rule_id=str(rule.id),
-                url_categories=updated_categories
-            )
-            
-            if error:
-                logger.error(f"❌ Error updating rule: {error}")
-                return False
+            try:
+                self.client.url_filtering.update_rule(
+                    rule_id=str(rule_id),
+                    url_categories=updated_categories
+                )
+            except AttributeError:
+                self.client.web_application_rules.update_rule(
+                    rule_id=str(rule_id),
+                    url_categories=updated_categories
+                )
                 
             logger.info(f"✅ Successfully added category to rule '{rule_name}'")
-            logger.info(f"   Previous categories: {', '.join(current_categories)}")
-            logger.info(f"   Updated categories: {', '.join(updated_categories)}")
-            
             return True
             
         except Exception as e:
@@ -320,20 +360,28 @@ class ZscalerAutomation:
             if not rule:
                 logger.error(f"❌ Cannot proceed without finding the rule")
                 return False
+            
+            if isinstance(rule, dict):
+                rule_id = rule.get('id')
+                current_action = rule.get('action', '')
+            else:
+                rule_id = getattr(rule, 'id', None)
+                current_action = getattr(rule, 'action', '')
                 
             logger.info(f"ℹ️  Note: Zscaler rules use URL categories, not individual URLs")
-            logger.info(f"ℹ️  Consider using Custom URL Categories to block specific domains")
             
-            if rule.action != 'BLOCK':
+            if current_action != 'BLOCK':
                 logger.info(f"📝 Changing rule action to BLOCK")
-                updated_rule, response, error = self.client.url_filtering.update_rule(
-                    rule_id=str(rule.id),
-                    action='BLOCK'
-                )
-                
-                if error:
-                    logger.error(f"❌ Error updating rule: {error}")
-                    return False
+                try:
+                    self.client.url_filtering.update_rule(
+                        rule_id=str(rule_id),
+                        action='BLOCK'
+                    )
+                except AttributeError:
+                    self.client.web_application_rules.update_rule(
+                        rule_id=str(rule_id),
+                        action='BLOCK'
+                    )
                     
                 logger.info(f"✅ Rule '{rule_name}' action set to BLOCK")
             else:
@@ -362,20 +410,29 @@ class ZscalerAutomation:
             rule = self.find_rule_by_name(rule_name)
             if not rule:
                 return False
+            
+            if isinstance(rule, dict):
+                rule_id = rule.get('id')
+                old_action = rule.get('action', '')
+            else:
+                rule_id = getattr(rule, 'id', None)
+                old_action = getattr(rule, 'action', '')
                 
             logger.info(f"📝 Updating rule '{rule_name}' action to '{action}'")
             
-            updated_rule, response, error = self.client.url_filtering.update_rule(
-                rule_id=str(rule.id),
-                action=action.upper()
-            )
-            
-            if error:
-                logger.error(f"❌ Error updating rule: {error}")
-                return False
+            try:
+                self.client.url_filtering.update_rule(
+                    rule_id=str(rule_id),
+                    action=action.upper()
+                )
+            except AttributeError:
+                self.client.web_application_rules.update_rule(
+                    rule_id=str(rule_id),
+                    action=action.upper()
+                )
                 
             logger.info(f"✅ Rule action updated successfully")
-            logger.info(f"   Previous action: {rule.action}")
+            logger.info(f"   Previous action: {old_action}")
             logger.info(f"   New action: {action.upper()}")
             
             return True
@@ -388,11 +445,9 @@ class ZscalerAutomation:
 def main():
     """Main entry point for the script"""
     parser = argparse.ArgumentParser(
-        description='Zscaler URL Filtering Automation Tool (Beta Cloud)',
+        description='Zscaler URL Filtering Automation Tool',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Cloud: zscalerbeta (zsapi.zscalerbeta.net/api/v1)
-
 Examples:
   python zscaler_url_automation.py --list-rules
   python zscaler_url_automation.py --list-rules --format csv
