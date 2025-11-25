@@ -1,3 +1,7 @@
+## Clean Playbook File
+
+Here's the complete, clean playbook - copy this **exactly** (no extra characters):
+```yaml
 ---
 - name: Zscaler URL Filtering Automation
   hosts: localhost
@@ -5,17 +9,11 @@
   gather_facts: yes
   
   vars:
-    # ==========================================
-    # Zscaler credentials from Semaphore Environment
-    # ==========================================
     zscaler_username: "{{ lookup('env', 'ZSCALER_USERNAME') }}"
     zscaler_password: "{{ lookup('env', 'ZSCALER_PASSWORD') }}"
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
     zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscalerbeta', true) }}"
     
-    # ==========================================
-    # Survey/Variable Group inputs from Semaphore
-    # ==========================================
     raw_operation: "{{ operation | default('list', true) }}"
     selected_rule_name: "{{ rule_name | default('', true) }}"
     selected_url_to_block: "{{ block_url | default('', true) }}"
@@ -23,9 +21,6 @@
     selected_rule_action: "{{ rule_action | default('', true) }}"
     selected_report_format: "{{ report_format | default('table', true) }}"
     
-    # ==========================================
-    # Normalize operation value (handles both Key and Value from Enum)
-    # ==========================================
     operation_map:
       "list": "list"
       "List All Rules": "list"
@@ -38,9 +33,6 @@
     
     selected_operation: "{{ operation_map[raw_operation] | default('list') }}"
     
-    # ==========================================
-    # Paths
-    # ==========================================
     script_path: "{{ playbook_dir }}/zscaler_url_automation.py"
     reports_dir: "{{ playbook_dir }}/reports"
     
@@ -86,9 +78,6 @@
       tags: always
       
   tasks:
-    # ==========================================
-    # TASK 1: List All Rules
-    # ==========================================
     - name: List all URL filtering rules
       command: >
         python3 {{ script_path }}
@@ -102,19 +91,14 @@
       register: list_output
       when: selected_operation == 'list'
       changed_when: false
-      tags:
-        - list
+      tags: list
         
     - name: Display list output
       debug:
         msg: "{{ list_output.stdout_lines }}"
       when: selected_operation == 'list' and list_output is defined and list_output.stdout_lines is defined
-      tags:
-        - list
+      tags: list
         
-    # ==========================================
-    # TASK 2: Add URL Category to Rule
-    # ==========================================
     - name: Validate inputs for add-category operation
       fail:
         msg: "Both 'rule_name' and 'url_category' are required for add-category operation"
@@ -143,12 +127,9 @@
       when: selected_operation == 'add-category' and add_category_output is defined and add_category_output.stdout_lines is defined
       tags: add-category
       
-    # ==========================================
-    # TASK 3: Block URL (Add to Rule)
-    # ==========================================
     - name: Validate inputs for block-url operation
       fail:
-        msg: "Both 'rule_name' and 'block_url' are required for block-url operation. Got rule_name='{{ selected_rule_name }}', block_url='{{ selected_url_to_block }}'"
+        msg: "Both 'rule_name' and 'block_url' are required. Got rule_name='{{ selected_rule_name }}', block_url='{{ selected_url_to_block }}'"
       when: 
         - selected_operation == 'block-url'
         - (selected_rule_name == '' or selected_url_to_block == '')
@@ -177,9 +158,6 @@
       when: selected_operation == 'block-url' and block_url_output is defined and block_url_output.stdout_lines is defined
       tags: block-url
       
-    # ==========================================
-    # TASK 4: Update Rule Action
-    # ==========================================
     - name: Validate inputs for update-action operation
       fail:
         msg: "Both 'rule_name' and 'rule_action' are required for update-action operation"
@@ -220,7 +198,7 @@
       
     - name: Display report locations
       debug:
-        msg: "📄 Report saved: {{ item.path }}"
+        msg: "Report saved: {{ item.path }}"
       loop: "{{ recent_reports.files | default([]) }}"
       when: recent_reports is defined and recent_reports.files is defined and recent_reports.files | length > 0
       tags: always
@@ -229,7 +207,7 @@
       debug:
         msg: 
           - "================================="
-          - "✅ Zscaler Automation Completed"
+          - "Zscaler Automation Completed"
           - "Operation: {{ selected_operation }}"
           - "Timestamp: {{ ansible_date_time.iso8601 }}"
           - "================================="
@@ -237,24 +215,3 @@
 ```
 
 ---
-
-## Key Changes Made
-
-| Change | Why |
-|--------|-----|
-| Added `operation_map` dictionary | Maps both "Block URL" → "block-url" and "block-url" → "block-url" |
-| Added `raw_operation` variable | Captures the original value from Semaphore |
-| Added DEBUG task | Shows exactly what values are received |
-| `selected_operation` uses map lookup | Normalizes any input format |
-
----
-
-## How It Works Now
-```
-Semaphore sends: "Block URL"
-     ↓
-operation_map["Block URL"] = "block-url"
-     ↓
-selected_operation = "block-url"
-     ↓
-Condition matches: when: selected_operation == 'block-url' ✅
