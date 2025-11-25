@@ -2,6 +2,7 @@
 """
 Zscaler URL Filtering Automation Script
 Manages URL filtering rules in Zscaler Internet Access (ZIA)
+Uses Cloud Service API Key authentication
 """
 
 import os
@@ -18,57 +19,56 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import pyzscaler SDK with proper fallback handling
+# Try to import zscaler SDK with proper fallback handling
 try:
-    from pyzscaler import ZIA
-    logger.info("✅ Successfully imported ZIA from pyzscaler")
+    from zscaler.oneapi_client import LegacyZIAClient
+    logger.info("✅ Successfully imported LegacyZIAClient from zscaler")
 except ImportError as e:
     logger.warning(f"⚠️ Import failed: {e}")
-    logger.info("📦 Attempting to install pyzscaler...")
+    logger.info("📦 Attempting to install zscaler-sdk-python...")
     
     try:
         # Install the SDK using the current Python interpreter
         subprocess.check_call([
             sys.executable, "-m", "pip", "install", 
-            "pyzscaler", "--upgrade", "--quiet"
+            "zscaler-sdk-python", "--upgrade", "--quiet"
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info("✅ Successfully installed pyzscaler")
+        logger.info("✅ Successfully installed zscaler-sdk-python")
         
         # Try importing again after installation
-        from pyzscaler import ZIA
+        from zscaler.oneapi_client import LegacyZIAClient
         logger.info("✅ Import successful after installation")
             
     except (subprocess.CalledProcessError, ImportError) as install_error:
         logger.error(f"❌ Failed to install or import SDK: {install_error}")
-        logger.error("❌ Zscaler SDK not installed. Run: pip install pyzscaler")
+        logger.error("❌ Zscaler SDK not installed. Run: pip install zscaler-sdk-python")
         sys.exit(1)
 
 
 class ZscalerURLAutomation:
-    """Handles Zscaler URL filtering automation operations"""
+    """Handles Zscaler URL filtering automation operations using Cloud Service API Key"""
     
     def __init__(self):
-        """Initialize Zscaler client with credentials from environment variables"""
-        self.username = os.getenv('ZSCALER_USERNAME')
-        self.password = os.getenv('ZSCALER_PASSWORD')
+        """Initialize Zscaler client with Cloud Service API Key from environment variables"""
         self.api_key = os.getenv('ZSCALER_API_KEY')
-        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscaler.net')
+        self.base_url = os.getenv('ZSCALER_BASE_URL', 'https://zsapi.zscalerbeta.net/api/v1')
         
         # Validate credentials
-        if not all([self.username, self.password, self.api_key]):
-            logger.error("❌ Missing required credentials. Set ZSCALER_USERNAME, ZSCALER_PASSWORD, and ZSCALER_API_KEY")
+        if not self.api_key:
+            logger.error("❌ Missing required API key. Set ZSCALER_API_KEY environment variable")
             sys.exit(1)
         
-        logger.info(f"🔐 Authenticating to Zscaler ({self.cloud})...")
+        logger.info(f"🔐 Authenticating to Zscaler using Cloud Service API Key...")
+        logger.info(f"📍 Base URL: {self.base_url}")
         
         try:
-            # Initialize ZIA client
-            self.zia = ZIA(
-                api_key=self.api_key,
-                cloud=self.cloud,
-                username=self.username,
-                password=self.password
-            )
+            # Initialize ZIA client with Cloud Service API Key
+            config = {
+                "apiKey": self.api_key,
+                "baseUrl": self.base_url
+            }
+            
+            self.client = LegacyZIAClient(config)
             logger.info("✅ Authentication successful")
         except Exception as e:
             logger.error(f"❌ Authentication failed: {e}")
@@ -84,7 +84,11 @@ class ZscalerURLAutomation:
         logger.info("📋 Fetching URL filtering rules...")
         
         try:
-            rules = self.zia.url_filtering_rules.list_rules()
+            rules, _, err = self.client.url_filtering_rules.list_rules()
+            
+            if err:
+                logger.error(f"❌ Error fetching rules: {err}")
+                sys.exit(1)
             
             if not rules:
                 logger.warning("⚠️ No URL filtering rules found")
@@ -126,7 +130,11 @@ class ZscalerURLAutomation:
             Rule dictionary if found, None otherwise
         """
         try:
-            rules = self.zia.url_filtering_rules.list_rules()
+            rules, _, err = self.client.url_filtering_rules.list_rules()
+            
+            if err:
+                logger.error(f"❌ Error fetching rules: {err}")
+                return None
             
             for rule in rules:
                 if rule.get('name') == rule_name or str(rule.get('id')) == rule_name:
@@ -170,10 +178,18 @@ class ZscalerURLAutomation:
             updated_categories = current_categories + [category_id]
             
             # Update the rule
-            self.zia.url_filtering_rules.update_rule(
+            update_data = {
+                'urlCategories': updated_categories
+            }
+            
+            _, _, err = self.client.url_filtering_rules.update_rule(
                 rule_id=rule_id,
-                url_categories=updated_categories
+                **update_data
             )
+            
+            if err:
+                logger.error(f"❌ Failed to update rule: {err}")
+                return False
             
             logger.info(f"✅ Successfully added category {category_id} to rule '{rule_name}'")
             return True
@@ -213,10 +229,18 @@ class ZscalerURLAutomation:
             updated_urls = current_urls + [url]
             
             # Update the rule
-            self.zia.url_filtering_rules.update_rule(
+            update_data = {
+                'blockOverride': updated_urls
+            }
+            
+            _, _, err = self.client.url_filtering_rules.update_rule(
                 rule_id=rule_id,
-                block_override=updated_urls
+                **update_data
             )
+            
+            if err:
+                logger.error(f"❌ Failed to update rule: {err}")
+                return False
             
             logger.info(f"✅ Successfully blocked URL '{url}' in rule '{rule_name}'")
             return True
@@ -253,10 +277,18 @@ class ZscalerURLAutomation:
             rule_id = rule['id']
             
             # Update the rule action
-            self.zia.url_filtering_rules.update_rule(
+            update_data = {
+                'action': action.upper()
+            }
+            
+            _, _, err = self.client.url_filtering_rules.update_rule(
                 rule_id=rule_id,
-                action=action.upper()
+                **update_data
             )
+            
+            if err:
+                logger.error(f"❌ Failed to update rule: {err}")
+                return False
             
             logger.info(f"✅ Successfully updated rule '{rule_name}' action to '{action}'")
             return True
@@ -269,7 +301,7 @@ class ZscalerURLAutomation:
 def main():
     """Main entry point for the script"""
     parser = argparse.ArgumentParser(
-        description='Zscaler URL Filtering Automation',
+        description='Zscaler URL Filtering Automation (Cloud Service API Key)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -287,6 +319,10 @@ Examples:
   
   # Update rule action
   python zscaler_url_automation.py --rule-name "Test Rule" --update-action BLOCK
+
+Environment Variables Required:
+  ZSCALER_API_KEY    - Your Cloud Service API Key
+  ZSCALER_BASE_URL   - API base URL (default: https://zsapi.zscalerbeta.net/api/v1)
         """
     )
     
