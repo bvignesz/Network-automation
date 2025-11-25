@@ -238,6 +238,6 @@
           Category ID: {{ selected_category_id | default('N/A') }}
           URL to Block: {{ selected_url_to_block | default('N/A') }}
           Action: {{ selected_action | default('N/A') }}
-          Status: {% if (list_output is defined and list_output.rc == 0) or (add_category_output is defined and add_category_output.rc == 0) or (block_url_output is defined and block_url_output.rc == 0) or (update_action_output is defined and update_action_output.rc == 0) %}SUCCESS{% else %}COMPLETED{% endif %}
+          Status: {% if (list_output is defined and list_output is not skipped and list_output.rc == 0) or (add_category_output is defined and add_category_output is not skipped and add_category_output.rc == 0) or (block_url_output is defined and block_url_output is not skipped and block_url_output.rc == 0) or (update_action_output is defined and update_action_output is not skipped and update_action_output.rc == 0) %}SUCCESS{% else %}COMPLETED{% endif %}
           ========================================
       tags: always
