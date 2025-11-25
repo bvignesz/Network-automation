@@ -1,5 +1,5 @@
 ---
-- name: Zscaler URL Filtering Automation
+- name: Zscaler URL Filtering Automation (Cloud Service API Key)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -12,11 +12,9 @@
     # Script location
     script_path: "/tmp/semaphore/project_1/repository_3_template_11/zscaler_url_automation.py"
     
-    # Zscaler credentials (should be provided via Semaphore secrets)
-    zscaler_username: "{{ lookup('env', 'ZSCALER_USERNAME') }}"
-    zscaler_password: "{{ lookup('env', 'ZSCALER_PASSWORD') }}"
+    # Zscaler credentials for Cloud Service API Key authentication
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
-    zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscaler.net', true) }}"
+    zscaler_base_url: "{{ lookup('env', 'ZSCALER_BASE_URL') | default('https://zsapi.zscalerbeta.net/api/v1', true) }}"
     
     # Operation name mapping (converts display names to internal codes)
     operation_map:
@@ -45,11 +43,9 @@
     - name: Validate required credentials
       assert:
         that:
-          - zscaler_username | length > 0
-          - zscaler_password | length > 0
           - zscaler_api_key | length > 0
-          - zscaler_cloud | length > 0
-        fail_msg: "Missing required Zscaler credentials. Check environment variables."
+          - zscaler_base_url | length > 0
+        fail_msg: "Missing required Zscaler credentials. Check ZSCALER_API_KEY environment variable."
         success_msg: "All required credentials are present"
       tags: always
 
@@ -66,14 +62,14 @@
       tags: always
 
     - name: Install Zscaler SDK
-      command: "{{ venv_pip }} install pyzscaler --upgrade --quiet"
+      command: "{{ venv_pip }} install zscaler-sdk-python --upgrade --quiet"
       register: pip_install
       changed_when: "'Successfully installed' in pip_install.stdout"
       failed_when: pip_install.rc != 0
       tags: always
 
     - name: Verify Zscaler SDK
-      command: "{{ venv_python }} -c \"from pyzscaler import ZIA; print('SDK_OK')\""
+      command: "{{ venv_python }} -c \"from zscaler.oneapi_client import LegacyZIAClient; print('SDK_OK')\""
       register: sdk_check
       failed_when: sdk_check.rc != 0
       changed_when: false
@@ -96,10 +92,8 @@
         --format {{ selected_report_format }}
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_USERNAME: "{{ zscaler_username }}"
-        ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: list_output
       when: selected_operation == 'list'
       tags: always
@@ -133,10 +127,8 @@
         --add-category "{{ selected_category_id }}"
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_USERNAME: "{{ zscaler_username }}"
-        ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: add_category_output
       when: 
         - selected_operation == 'add-category'
@@ -173,10 +165,8 @@
         --block-url "{{ selected_url_to_block }}"
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_USERNAME: "{{ zscaler_username }}"
-        ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: block_url_output
       when:
         - selected_operation == 'block-url'
@@ -214,10 +204,8 @@
         --update-action "{{ selected_action }}"
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_USERNAME: "{{ zscaler_username }}"
-        ZSCALER_PASSWORD: "{{ zscaler_password }}"
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_CLOUD: "{{ zscaler_cloud }}"
+        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
       register: update_action_output
       when:
         - selected_operation == 'update-action'
