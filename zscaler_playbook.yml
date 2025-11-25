@@ -18,8 +18,19 @@
     zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
     zscaler_cloud: "{{ lookup('env', 'ZSCALER_CLOUD') | default('zscaler.net', true) }}"
     
+    # Operation name mapping (converts display names to internal codes)
+    operation_map:
+      "List All Rules": "list"
+      "list": "list"
+      "Add URL Category": "add-category"
+      "add-category": "add-category"
+      "Block URL": "block-url"
+      "block-url": "block-url"
+      "Update Rule Action": "update-action"
+      "update-action": "update-action"
+    
     # Operation parameters (from Semaphore survey/form)
-    selected_operation: "{{ operation | default('list') }}"
+    selected_operation: "{{ operation_map[operation | default('list')] | default('list') }}"
     selected_rule_name: "{{ rule_name | default('') }}"
     selected_category_id: "{{ category_id | default('') }}"
     selected_url_to_block: "{{ url_to_block | default('') }}"
