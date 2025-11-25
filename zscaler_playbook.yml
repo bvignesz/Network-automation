@@ -2,7 +2,7 @@
 - name: Zscaler URL Filtering Automation
   hosts: localhost
   connection: local
-  gather_facts: yes  # Changed to 'yes' - needed for ansible_date_time in Summary
+  gather_facts: yes
   
   vars:
     # ==========================================
@@ -15,14 +15,28 @@
     
     # ==========================================
     # Survey/Variable Group inputs from Semaphore
-    # IMPORTANT: Use DIFFERENT internal names to avoid recursive loop
     # ==========================================
-    selected_operation: "{{ operation | default('list', true) }}"
+    raw_operation: "{{ operation | default('list', true) }}"
     selected_rule_name: "{{ rule_name | default('', true) }}"
     selected_url_to_block: "{{ block_url | default('', true) }}"
     selected_url_category: "{{ url_category | default('', true) }}"
     selected_rule_action: "{{ rule_action | default('', true) }}"
     selected_report_format: "{{ report_format | default('table', true) }}"
+    
+    # ==========================================
+    # Normalize operation value (handles both Key and Value from Enum)
+    # ==========================================
+    operation_map:
+      "list": "list"
+      "List All Rules": "list"
+      "add-category": "add-category"
+      "Add URL Category to Rule": "add-category"
+      "block-url": "block-url"
+      "Block URL": "block-url"
+      "update-action": "update-action"
+      "Update Rule Action": "update-action"
+    
+    selected_operation: "{{ operation_map[raw_operation] | default('list') }}"
     
     # ==========================================
     # Paths
@@ -31,6 +45,15 @@
     reports_dir: "{{ playbook_dir }}/reports"
     
   pre_tasks:
+    - name: DEBUG - Show received variables
+      debug:
+        msg:
+          - "Raw operation received: '{{ raw_operation }}'"
+          - "Normalized operation: '{{ selected_operation }}'"
+          - "Rule name: '{{ selected_rule_name }}'"
+          - "URL to block: '{{ selected_url_to_block }}'"
+      tags: always
+    
     - name: Validate required environment variables
       fail:
         msg: "Missing required environment variable: {{ item }}"
@@ -125,7 +148,7 @@
     # ==========================================
     - name: Validate inputs for block-url operation
       fail:
-        msg: "Both 'rule_name' and 'block_url' are required for block-url operation"
+        msg: "Both 'rule_name' and 'block_url' are required for block-url operation. Got rule_name='{{ selected_rule_name }}', block_url='{{ selected_url_to_block }}'"
       when: 
         - selected_operation == 'block-url'
         - (selected_rule_name == '' or selected_url_to_block == '')
@@ -142,7 +165,10 @@
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
         ZSCALER_CLOUD: "{{ zscaler_cloud }}"
       register: block_url_output
-      when: selected_operation == 'block-url'
+      when: 
+        - selected_operation == 'block-url'
+        - selected_rule_name != ''
+        - selected_url_to_block != ''
       tags: block-url
       
     - name: Display block-url output
@@ -208,3 +234,27 @@
           - "Timestamp: {{ ansible_date_time.iso8601 }}"
           - "================================="
       tags: always
+```
+
+---
+
+## Key Changes Made
+
+| Change | Why |
+|--------|-----|
+| Added `operation_map` dictionary | Maps both "Block URL" → "block-url" and "block-url" → "block-url" |
+| Added `raw_operation` variable | Captures the original value from Semaphore |
+| Added DEBUG task | Shows exactly what values are received |
+| `selected_operation` uses map lookup | Normalizes any input format |
+
+---
+
+## How It Works Now
+```
+Semaphore sends: "Block URL"
+     ↓
+operation_map["Block URL"] = "block-url"
+     ↓
+selected_operation = "block-url"
+     ↓
+Condition matches: when: selected_operation == 'block-url' ✅
