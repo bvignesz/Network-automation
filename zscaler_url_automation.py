@@ -3,7 +3,9 @@
 Zscaler URL Filtering Automation Script
 Purpose: List rules, update policies, add URLs, generate reports
 Author: Network Automation Team
-Version: 2.0
+Version: 2.1
+Cloud: zscalerbeta (sandbox/test)
+API Base: zsapi.zscalerbeta.net/api/v1
 """
 
 import os
@@ -12,7 +14,7 @@ import json
 import csv
 import argparse
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import logging
 
 # Configure logging
@@ -29,6 +31,20 @@ except ImportError:
     sys.exit(1)
 
 
+# ==========================================
+# Zscaler Cloud Configuration
+# ==========================================
+ZSCALER_CLOUDS = {
+    'zscaler': 'zsapi.zscaler.net',
+    'zscalerone': 'zsapi.zscalerone.net',
+    'zscalertwo': 'zsapi.zscalertwo.net',
+    'zscalerthree': 'zsapi.zscalerthree.net',
+    'zscloud': 'zsapi.zscloud.net',
+    'zscalerbeta': 'zsapi.zscalerbeta.net',  # Your sandbox environment
+    'zscalergov': 'zsapi.zscalergov.net',
+}
+
+
 class ZscalerAutomation:
     """Main class for Zscaler URL filtering automation"""
     
@@ -37,9 +53,10 @@ class ZscalerAutomation:
         self.username = os.getenv('ZSCALER_USERNAME')
         self.password = os.getenv('ZSCALER_PASSWORD')
         self.api_key = os.getenv('ZSCALER_API_KEY')
-        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscaler')
+        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscalerbeta')  # Default to beta
         
         self._validate_credentials()
+        self._validate_cloud()
         self.client = self._initialize_client()
         
     def _validate_credentials(self):
@@ -56,6 +73,15 @@ class ZscalerAutomation:
             logger.error(f"❌ Missing environment variables: {', '.join(missing)}")
             logger.error("Set them in Semaphore Environment or export them")
             sys.exit(1)
+    
+    def _validate_cloud(self):
+        """Validate cloud name is supported"""
+        if self.cloud not in ZSCALER_CLOUDS:
+            logger.error(f"❌ Invalid cloud '{self.cloud}'")
+            logger.error(f"   Supported clouds: {', '.join(ZSCALER_CLOUDS.keys())}")
+            sys.exit(1)
+        logger.info(f"☁️  Cloud: {self.cloud}")
+        logger.info(f"🌐 API Base: {ZSCALER_CLOUDS[self.cloud]}/api/v1")
             
     def _initialize_client(self):
         """Initialize and authenticate Zscaler client"""
@@ -71,6 +97,9 @@ class ZscalerAutomation:
             return client
         except Exception as e:
             logger.error(f"❌ Failed to authenticate: {str(e)}")
+            logger.error(f"   Cloud: {self.cloud}")
+            logger.error(f"   Username: {self.username}")
+            logger.error(f"   API Endpoint: {ZSCALER_CLOUDS.get(self.cloud, 'unknown')}")
             sys.exit(1)
             
     def list_all_rules(self, output_format: str = 'table') -> List[Dict]:
@@ -106,7 +135,7 @@ class ZscalerAutomation:
                     'state': rule.state,
                     'action': rule.action,
                     'order': rule.order,
-                    'rank': rule.rank,
+                    'rank': getattr(rule, 'rank', 'N/A'),
                     'description': rule.description or 'N/A',
                     'url_categories': ', '.join(rule.url_categories) if rule.url_categories else 'N/A',
                     'protocols': ', '.join(rule.protocols) if rule.protocols else 'N/A',
@@ -143,8 +172,13 @@ class ZscalerAutomation:
         print("="*150)
         
         for rule in rules_data:
-            print(f"{rule['id']:<10} {rule['name']:<30} {rule['state']:<10} {rule['action']:<10} "
-                  f"{rule['order']:<6} {rule['url_categories']:<40} {rule['description']:<30}")
+            # Truncate long strings for display
+            name = str(rule['name'])[:28] + '..' if len(str(rule['name'])) > 30 else rule['name']
+            categories = str(rule['url_categories'])[:38] + '..' if len(str(rule['url_categories'])) > 40 else rule['url_categories']
+            desc = str(rule['description'])[:28] + '..' if len(str(rule['description'])) > 30 else rule['description']
+            
+            print(f"{rule['id']:<10} {name:<30} {rule['state']:<10} {rule['action']:<10} "
+                  f"{rule['order']:<6} {categories:<40} {desc:<30}")
                   
         print("="*150)
         print(f"\n📊 Total Rules: {len(rules_data)}")
@@ -156,7 +190,6 @@ class ZscalerAutomation:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f"reports/zscaler_rules_{timestamp}.csv"
         
-        # Create reports directory if it doesn't exist
         os.makedirs('reports', exist_ok=True)
         
         try:
@@ -181,7 +214,13 @@ class ZscalerAutomation:
         
         try:
             with open(filename, 'w') as jsonfile:
-                json.dump(rules_data, jsonfile, indent=2)
+                json.dump({
+                    'cloud': self.cloud,
+                    'api_base': ZSCALER_CLOUDS[self.cloud],
+                    'exported_at': datetime.now().isoformat(),
+                    'total_rules': len(rules_data),
+                    'rules': rules_data
+                }, jsonfile, indent=2)
                 
             logger.info(f"✅ JSON report exported: {filename}")
             print(f"\n📄 Report saved: {filename}")
@@ -189,7 +228,7 @@ class ZscalerAutomation:
         except Exception as e:
             logger.error(f"❌ Error exporting JSON: {str(e)}")
             
-    def find_rule_by_name(self, rule_name: str) -> Optional[Dict]:
+    def find_rule_by_name(self, rule_name: str) -> Optional[object]:
         """Find a specific rule by name"""
         try:
             rules, response, error = self.client.url_filtering.list_rules(
@@ -200,6 +239,13 @@ class ZscalerAutomation:
                 logger.warning(f"⚠️  Rule '{rule_name}' not found")
                 return None
                 
+            # Find exact match first
+            for rule in rules:
+                if rule.name.lower() == rule_name.lower():
+                    logger.info(f"✅ Found rule: {rule.name} (ID: {rule.id})")
+                    return rule
+            
+            # If no exact match, use first result
             if len(rules) > 1:
                 logger.warning(f"⚠️  Multiple rules found matching '{rule_name}'. Using first match.")
                 
@@ -212,36 +258,22 @@ class ZscalerAutomation:
             return None
             
     def add_url_category_to_rule(self, rule_name: str, url_category: str) -> bool:
-        """
-        Add a URL category to an existing rule
-        
-        Args:
-            rule_name: Name of the rule to update
-            url_category: URL category to add (e.g., 'OTHER_ADULT_MATERIAL')
-            
-        Returns:
-            Boolean indicating success
-        """
+        """Add a URL category to an existing rule"""
         try:
-            # Find the rule
             rule = self.find_rule_by_name(rule_name)
             if not rule:
                 return False
                 
-            # Get current categories
             current_categories = rule.url_categories or []
             
-            # Check if category already exists
             if url_category in current_categories:
                 logger.warning(f"⚠️  Category '{url_category}' already exists in rule '{rule_name}'")
                 return True
                 
-            # Add new category
             updated_categories = current_categories + [url_category]
             
             logger.info(f"📝 Adding category '{url_category}' to rule '{rule_name}'")
             
-            # Update the rule
             updated_rule, response, error = self.client.url_filtering.update_rule(
                 rule_id=str(rule.id),
                 url_categories=updated_categories
@@ -262,34 +294,19 @@ class ZscalerAutomation:
             return False
             
     def block_url_in_rule(self, rule_name: str, url_to_block: str) -> bool:
-        """
-        Block a specific URL by adding it to a rule
-        Note: Zscaler doesn't support individual URLs in rules directly,
-        so this adds the URL to custom categories or creates a new rule
-        
-        Args:
-            rule_name: Name of the rule to update
-            url_to_block: URL to block (e.g., 'badsite.com')
-            
-        Returns:
-            Boolean indicating success
-        """
+        """Block a specific URL by updating rule action"""
         try:
             logger.info(f"🚫 Attempting to block URL: {url_to_block}")
             logger.info(f"📝 Target rule: {rule_name}")
             
-            # Find the rule
             rule = self.find_rule_by_name(rule_name)
             if not rule:
                 logger.error(f"❌ Cannot proceed without finding the rule")
                 return False
                 
-            # For demonstration, we'll add a common blocking category
-            # In production, you might use Custom URL Categories
             logger.info(f"ℹ️  Note: Zscaler rules use URL categories, not individual URLs")
             logger.info(f"ℹ️  Consider using Custom URL Categories to block specific domains")
             
-            # Example: Update rule to BLOCK action if not already
             if rule.action != 'BLOCK':
                 logger.info(f"📝 Changing rule action to BLOCK")
                 updated_rule, response, error = self.client.url_filtering.update_rule(
@@ -305,8 +322,7 @@ class ZscalerAutomation:
             else:
                 logger.info(f"ℹ️  Rule already set to BLOCK")
                 
-            # Log the URL for manual addition to custom categories
-            logger.warning(f"⚠️  Manual step required:")
+            logger.warning(f"⚠️  Manual step required to block specific URL:")
             logger.warning(f"   1. Go to Zscaler Admin > URL & Cloud App Control > Custom Categories")
             logger.warning(f"   2. Add '{url_to_block}' to a custom category")
             logger.warning(f"   3. Assign that category to rule '{rule_name}'")
@@ -318,16 +334,7 @@ class ZscalerAutomation:
             return False
             
     def update_rule_action(self, rule_name: str, action: str) -> bool:
-        """
-        Update the action of a rule
-        
-        Args:
-            rule_name: Name of the rule
-            action: New action (ALLOW, BLOCK, CAUTION)
-            
-        Returns:
-            Boolean indicating success
-        """
+        """Update the action of a rule"""
         valid_actions = ['ALLOW', 'BLOCK', 'CAUTION', 'NONE', 'ICAP_RESPONSE']
         
         if action.upper() not in valid_actions:
@@ -364,9 +371,11 @@ class ZscalerAutomation:
 def main():
     """Main entry point for the script"""
     parser = argparse.ArgumentParser(
-        description='Zscaler URL Filtering Automation Tool',
+        description='Zscaler URL Filtering Automation Tool (Beta Cloud)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Cloud: zscalerbeta (zsapi.zscalerbeta.net/api/v1)
+
 Examples:
   # List all rules in table format
   python zscaler_url_automation.py --list-rules
@@ -385,13 +394,11 @@ Examples:
         """
     )
     
-    # Main operations
     parser.add_argument('--list-rules', action='store_true',
                         help='List all URL filtering rules')
     parser.add_argument('--format', choices=['table', 'csv', 'json'], default='table',
                         help='Output format for listing rules (default: table)')
     
-    # Rule operations
     parser.add_argument('--rule-name', type=str,
                         help='Name of the rule to operate on')
     parser.add_argument('--add-category', type=str,
@@ -406,11 +413,9 @@ Examples:
     # Initialize automation client
     zscaler = ZscalerAutomation()
     
-    # Execute based on arguments
     success = True
     
     if args.list_rules or (not any([args.add_category, args.block_url, args.action])):
-        # Default action: list rules
         zscaler.list_all_rules(output_format=args.format)
         
     if args.rule_name:
