@@ -32,7 +32,7 @@
     script_path: "{{ playbook_dir }}/zscaler_url_automation.py"
     reports_dir: "{{ playbook_dir }}/reports"
     
-  pre_tasks:
+  tasks:
     - name: DEBUG - Show ALL received variables
       debug:
         msg:
@@ -55,6 +55,11 @@
       stat:
         path: "{{ script_path }}"
       register: script_stat
+      tags: always
+      
+    - name: DEBUG - Script check
+      debug:
+        msg: "Script exists: {{ script_stat.stat.exists }} at {{ script_path }}"
       tags: always
       
     - name: Fail if script does not exist
@@ -83,32 +88,27 @@
     - name: Install Zscaler SDK
       command: pip3 install zscaler-sdk-python --upgrade --quiet
       register: pip_install
-      changed_when: "'Successfully installed' in pip_install.stdout"
+      changed_when: false
       failed_when: false
       tags: always
       
-    - name: Verify Zscaler SDK installation
-      command: python3 -c "from zscaler import ZIAClientHelper; print('SDK OK')"
+    - name: Verify Zscaler SDK
+      command: python3 -c "from zscaler import ZIAClientHelper; print('SDK_OK')"
       register: sdk_check
       failed_when: false
       changed_when: false
       tags: always
       
-    - name: DEBUG - SDK verification
+    - name: DEBUG - SDK check result
       debug:
-        msg:
-          - "SDK check return code: {{ sdk_check.rc }}"
-          - "SDK check stdout: {{ sdk_check.stdout | default('none') }}"
-          - "SDK check stderr: {{ sdk_check.stderr | default('none') }}"
+        msg: "SDK check: rc={{ sdk_check.rc }}, stdout={{ sdk_check.stdout }}"
       tags: always
-      
-    - name: Warn if SDK check failed (will try alternative import in script)
+
+    - name: DEBUG - About to check operation for list
       debug:
-        msg: "⚠️ Primary SDK import failed, script will try alternative methods"
-      when: sdk_check.rc != 0
+        msg: "Checking if '{{ selected_operation }}' == 'list' : {{ selected_operation == 'list' }}"
       tags: always
-      
-  tasks:
+
     - name: List all URL filtering rules
       command: >
         python3 {{ script_path }}
@@ -121,16 +121,24 @@
         ZSCALER_CLOUD: "{{ zscaler_cloud }}"
       register: list_output
       when: selected_operation == 'list'
-      changed_when: false
-      tags: list
+      tags: always
         
     - name: Display list output
       debug:
-        msg: "{{ list_output.stdout_lines | default(['No output']) }}"
+        msg: "{{ list_output.stdout_lines | default(['No output from script']) }}"
       when: 
         - selected_operation == 'list'
-        - list_output is defined
-      tags: list
+        - list_output.stdout_lines is defined
+      tags: always
+
+    - name: Display list errors if any
+      debug:
+        msg: "STDERR: {{ list_output.stderr_lines | default(['No errors']) }}"
+      when: 
+        - selected_operation == 'list'
+        - list_output.stderr_lines is defined
+        - list_output.stderr_lines | length > 0
+      tags: always
         
     - name: Validate inputs for add-category operation
       fail:
@@ -138,7 +146,7 @@
       when: 
         - selected_operation == 'add-category'
         - (selected_rule_name | length == 0) or (selected_url_category | length == 0)
-      tags: add-category
+      tags: always
       
     - name: Add URL category to existing rule
       command: >
@@ -155,26 +163,24 @@
         - selected_operation == 'add-category'
         - selected_rule_name | length > 0
         - selected_url_category | length > 0
-      tags: add-category
+      tags: always
       
     - name: Display add-category output
       debug:
         msg: "{{ add_category_output.stdout_lines | default(['No output']) }}"
       when: 
         - selected_operation == 'add-category'
-        - add_category_output is defined
-      tags: add-category
+        - add_category_output.stdout_lines is defined
+      tags: always
       
-    - name: DEBUG - Block URL conditions check
+    - name: DEBUG - Block URL conditions
       debug:
         msg:
-          - "============= BLOCK URL CONDITIONS ============="
-          - "Condition 1 - operation == 'block-url': {{ selected_operation == 'block-url' }}"
-          - "Condition 2 - rule_name length > 0: {{ selected_rule_name | length > 0 }}"
-          - "Condition 3 - url_to_block length > 0: {{ selected_url_to_block | length > 0 }}"
-          - "ALL conditions met: {{ (selected_operation == 'block-url') and (selected_rule_name | length > 0) and (selected_url_to_block | length > 0) }}"
+          - "operation == 'block-url': {{ selected_operation == 'block-url' }}"
+          - "rule_name length > 0: {{ selected_rule_name | length > 0 }}"
+          - "url_to_block length > 0: {{ selected_url_to_block | length > 0 }}"
       when: selected_operation == 'block-url'
-      tags: block-url
+      tags: always
       
     - name: Validate inputs for block-url operation
       fail:
@@ -182,7 +188,7 @@
       when: 
         - selected_operation == 'block-url'
         - (selected_rule_name | length == 0) or (selected_url_to_block | length == 0)
-      tags: block-url
+      tags: always
       
     - name: Block URL in specified rule
       command: >
@@ -199,15 +205,15 @@
         - selected_operation == 'block-url'
         - selected_rule_name | length > 0
         - selected_url_to_block | length > 0
-      tags: block-url
+      tags: always
       
     - name: Display block-url output
       debug:
         msg: "{{ block_url_output.stdout_lines | default(['No output']) }}"
       when: 
         - selected_operation == 'block-url'
-        - block_url_output is defined
-      tags: block-url
+        - block_url_output.stdout_lines is defined
+      tags: always
       
     - name: Validate inputs for update-action operation
       fail:
@@ -215,7 +221,7 @@
       when: 
         - selected_operation == 'update-action'
         - (selected_rule_name | length == 0) or (selected_rule_action | length == 0)
-      tags: update-action
+      tags: always
       
     - name: Update rule action
       command: >
@@ -232,17 +238,16 @@
         - selected_operation == 'update-action'
         - selected_rule_name | length > 0
         - selected_rule_action | length > 0
-      tags: update-action
+      tags: always
       
     - name: Display update-action output
       debug:
         msg: "{{ update_action_output.stdout_lines | default(['No output']) }}"
       when: 
         - selected_operation == 'update-action'
-        - update_action_output is defined
-      tags: update-action
+        - update_action_output.stdout_lines is defined
+      tags: always
       
-  post_tasks:
     - name: Find generated reports
       find:
         paths: "{{ reports_dir }}"
@@ -256,7 +261,9 @@
       debug:
         msg: "Report saved: {{ item.path }}"
       loop: "{{ recent_reports.files | default([]) }}"
-      when: recent_reports is defined and recent_reports.files is defined and recent_reports.files | length > 0
+      when: 
+        - recent_reports.files is defined
+        - recent_reports.files | length > 0
       tags: always
       
     - name: Summary
