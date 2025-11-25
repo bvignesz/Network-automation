@@ -33,13 +33,44 @@
     reports_dir: "{{ playbook_dir }}/reports"
     
   pre_tasks:
-    - name: DEBUG - Show received variables
+    - name: DEBUG - Show ALL received variables
       debug:
         msg:
-          - "Raw operation received: '{{ raw_operation }}'"
+          - "============= INPUT DEBUG ============="
+          - "Raw operation: '{{ raw_operation }}'"
           - "Normalized operation: '{{ selected_operation }}'"
           - "Rule name: '{{ selected_rule_name }}'"
+          - "Rule name length: {{ selected_rule_name | length }}"
           - "URL to block: '{{ selected_url_to_block }}'"
+          - "URL to block length: {{ selected_url_to_block | length }}"
+          - "URL category: '{{ selected_url_category }}'"
+          - "Rule action: '{{ selected_rule_action }}'"
+          - "Report format: '{{ selected_report_format }}'"
+          - "Script path: '{{ script_path }}'"
+          - "============= ENV DEBUG ============="
+          - "ZSCALER_USERNAME set: {{ zscaler_username | length > 0 }}"
+          - "ZSCALER_PASSWORD set: {{ zscaler_password | length > 0 }}"
+          - "ZSCALER_API_KEY set: {{ zscaler_api_key | length > 0 }}"
+          - "ZSCALER_CLOUD: '{{ zscaler_cloud }}'"
+      tags: always
+    
+    - name: Check if Python script exists
+      stat:
+        path: "{{ script_path }}"
+      register: script_stat
+      tags: always
+      
+    - name: DEBUG - Script existence check
+      debug:
+        msg:
+          - "Script exists: {{ script_stat.stat.exists }}"
+          - "Script path: {{ script_path }}"
+      tags: always
+      
+    - name: Fail if script does not exist
+      fail:
+        msg: "Python script not found at {{ script_path }}"
+      when: not script_stat.stat.exists
       tags: always
     
     - name: Validate required environment variables
@@ -59,16 +90,24 @@
         mode: '0755'
       tags: always
       
-    - name: Validate Python dependencies
-      command: python3 -c "import zscaler"
+    - name: Check Python and Zscaler SDK
+      command: python3 -c "import zscaler; print('Zscaler SDK OK')"
       register: python_check
       failed_when: false
       changed_when: false
       tags: always
       
+    - name: DEBUG - Python check result
+      debug:
+        msg:
+          - "Python check return code: {{ python_check.rc }}"
+          - "Python check stdout: {{ python_check.stdout | default('none') }}"
+          - "Python check stderr: {{ python_check.stderr | default('none') }}"
+      tags: always
+      
     - name: Install Python dependencies if needed
       pip:
-        requirements: "{{ playbook_dir }}/requirements.txt"
+        name: zscaler-sdk-python
         executable: pip3
       when: python_check.rc != 0
       tags: always
@@ -91,8 +130,10 @@
         
     - name: Display list output
       debug:
-        msg: "{{ list_output.stdout_lines }}"
-      when: selected_operation == 'list' and list_output is defined and list_output.stdout_lines is defined
+        msg: "{{ list_output.stdout_lines | default(['No output']) }}"
+      when: 
+        - selected_operation == 'list'
+        - list_output is defined
       tags: list
         
     - name: Validate inputs for add-category operation
@@ -100,7 +141,7 @@
         msg: "Both 'rule_name' and 'url_category' are required for add-category operation"
       when: 
         - selected_operation == 'add-category'
-        - (selected_rule_name == '' or selected_url_category == '')
+        - (selected_rule_name | length == 0) or (selected_url_category | length == 0)
       tags: add-category
       
     - name: Add URL category to existing rule
@@ -114,21 +155,37 @@
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
         ZSCALER_CLOUD: "{{ zscaler_cloud }}"
       register: add_category_output
-      when: selected_operation == 'add-category'
+      when: 
+        - selected_operation == 'add-category'
+        - selected_rule_name | length > 0
+        - selected_url_category | length > 0
       tags: add-category
       
     - name: Display add-category output
       debug:
-        msg: "{{ add_category_output.stdout_lines }}"
-      when: selected_operation == 'add-category' and add_category_output is defined and add_category_output.stdout_lines is defined
+        msg: "{{ add_category_output.stdout_lines | default(['No output']) }}"
+      when: 
+        - selected_operation == 'add-category'
+        - add_category_output is defined
       tags: add-category
+      
+    - name: DEBUG - Block URL conditions check
+      debug:
+        msg:
+          - "============= BLOCK URL CONDITIONS ============="
+          - "Condition 1 - operation == 'block-url': {{ selected_operation == 'block-url' }}"
+          - "Condition 2 - rule_name length > 0: {{ selected_rule_name | length > 0 }}"
+          - "Condition 3 - url_to_block length > 0: {{ selected_url_to_block | length > 0 }}"
+          - "ALL conditions met: {{ (selected_operation == 'block-url') and (selected_rule_name | length > 0) and (selected_url_to_block | length > 0) }}"
+      when: selected_operation == 'block-url'
+      tags: block-url
       
     - name: Validate inputs for block-url operation
       fail:
-        msg: "Both 'rule_name' and 'block_url' are required. Got rule_name='{{ selected_rule_name }}', block_url='{{ selected_url_to_block }}'"
+        msg: "Both 'rule_name' and 'block_url' are required. Got rule_name='{{ selected_rule_name }}' (len={{ selected_rule_name | length }}), block_url='{{ selected_url_to_block }}' (len={{ selected_url_to_block | length }})"
       when: 
         - selected_operation == 'block-url'
-        - (selected_rule_name == '' or selected_url_to_block == '')
+        - (selected_rule_name | length == 0) or (selected_url_to_block | length == 0)
       tags: block-url
       
     - name: Block URL in specified rule
@@ -144,14 +201,16 @@
       register: block_url_output
       when: 
         - selected_operation == 'block-url'
-        - selected_rule_name != ''
-        - selected_url_to_block != ''
+        - selected_rule_name | length > 0
+        - selected_url_to_block | length > 0
       tags: block-url
       
     - name: Display block-url output
       debug:
-        msg: "{{ block_url_output.stdout_lines }}"
-      when: selected_operation == 'block-url' and block_url_output is defined and block_url_output.stdout_lines is defined
+        msg: "{{ block_url_output.stdout_lines | default(['No output']) }}"
+      when: 
+        - selected_operation == 'block-url'
+        - block_url_output is defined
       tags: block-url
       
     - name: Validate inputs for update-action operation
@@ -159,7 +218,7 @@
         msg: "Both 'rule_name' and 'rule_action' are required for update-action operation"
       when: 
         - selected_operation == 'update-action'
-        - (selected_rule_name == '' or selected_rule_action == '')
+        - (selected_rule_name | length == 0) or (selected_rule_action | length == 0)
       tags: update-action
       
     - name: Update rule action
@@ -173,13 +232,18 @@
         ZSCALER_API_KEY: "{{ zscaler_api_key }}"
         ZSCALER_CLOUD: "{{ zscaler_cloud }}"
       register: update_action_output
-      when: selected_operation == 'update-action'
+      when: 
+        - selected_operation == 'update-action'
+        - selected_rule_name | length > 0
+        - selected_rule_action | length > 0
       tags: update-action
       
     - name: Display update-action output
       debug:
-        msg: "{{ update_action_output.stdout_lines }}"
-      when: selected_operation == 'update-action' and update_action_output is defined and update_action_output.stdout_lines is defined
+        msg: "{{ update_action_output.stdout_lines | default(['No output']) }}"
+      when: 
+        - selected_operation == 'update-action'
+        - update_action_output is defined
       tags: update-action
       
   post_tasks:
