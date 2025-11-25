@@ -3,7 +3,7 @@
 Zscaler URL Filtering Automation Script
 Purpose: List rules, update policies, add URLs, generate reports
 Author: Network Automation Team
-Version: 2.1
+Version: 2.2
 Cloud: zscalerbeta (sandbox/test)
 API Base: zsapi.zscalerbeta.net/api/v1
 """
@@ -13,6 +13,7 @@ import sys
 import json
 import csv
 import argparse
+import subprocess
 from datetime import datetime
 from typing import List, Dict, Optional
 import logging
@@ -24,11 +25,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def install_zscaler_sdk():
+    """Attempt to install Zscaler SDK if not present"""
+    logger.info("📦 Attempting to install zscaler-sdk-python...")
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", 
+            "zscaler-sdk-python", "--quiet", "--user"
+        ])
+        logger.info("✅ Successfully installed zscaler-sdk-python")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Failed to install SDK: {e}")
+        return False
+
+
+# Try to import Zscaler SDK, install if missing
 try:
     from zscaler.zia import ZIAClientHelper
+    SDK_AVAILABLE = True
 except ImportError:
-    logger.error("❌ Zscaler SDK not installed. Run: pip install zscaler-sdk-python")
-    sys.exit(1)
+    logger.warning("⚠️ Zscaler SDK not found, attempting to install...")
+    if install_zscaler_sdk():
+        try:
+            from zscaler.zia import ZIAClientHelper
+            SDK_AVAILABLE = True
+        except ImportError:
+            logger.error("❌ Zscaler SDK installation failed. Please run: pip install zscaler-sdk-python")
+            SDK_AVAILABLE = False
+    else:
+        SDK_AVAILABLE = False
 
 
 # ==========================================
@@ -40,7 +67,7 @@ ZSCALER_CLOUDS = {
     'zscalertwo': 'zsapi.zscalertwo.net',
     'zscalerthree': 'zsapi.zscalerthree.net',
     'zscloud': 'zsapi.zscloud.net',
-    'zscalerbeta': 'zsapi.zscalerbeta.net',  # Your sandbox environment
+    'zscalerbeta': 'zsapi.zscalerbeta.net',
     'zscalergov': 'zsapi.zscalergov.net',
 }
 
@@ -50,10 +77,14 @@ class ZscalerAutomation:
     
     def __init__(self):
         """Initialize Zscaler client with environment variables"""
+        if not SDK_AVAILABLE:
+            logger.error("❌ Cannot initialize: Zscaler SDK not available")
+            sys.exit(1)
+            
         self.username = os.getenv('ZSCALER_USERNAME')
         self.password = os.getenv('ZSCALER_PASSWORD')
         self.api_key = os.getenv('ZSCALER_API_KEY')
-        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscalerbeta')  # Default to beta
+        self.cloud = os.getenv('ZSCALER_CLOUD', 'zscalerbeta')
         
         self._validate_credentials()
         self._validate_cloud()
@@ -103,15 +134,7 @@ class ZscalerAutomation:
             sys.exit(1)
             
     def list_all_rules(self, output_format: str = 'table') -> List[Dict]:
-        """
-        List all URL filtering rules with their status
-        
-        Args:
-            output_format: 'table', 'csv', 'json'
-            
-        Returns:
-            List of rule dictionaries
-        """
+        """List all URL filtering rules with their status"""
         try:
             logger.info("📋 Fetching all URL filtering rules...")
             rules, response, error = self.client.url_filtering.list_rules()
@@ -126,7 +149,6 @@ class ZscalerAutomation:
                 
             logger.info(f"✅ Found {len(rules)} URL filtering rules")
             
-            # Extract relevant information
             rules_data = []
             for rule in rules:
                 rule_info = {
@@ -145,10 +167,8 @@ class ZscalerAutomation:
                 }
                 rules_data.append(rule_info)
                 
-            # Sort by order
             rules_data.sort(key=lambda x: x['order'])
             
-            # Display based on format
             if output_format == 'table':
                 self._display_table(rules_data)
             elif output_format == 'csv':
@@ -172,7 +192,6 @@ class ZscalerAutomation:
         print("="*150)
         
         for rule in rules_data:
-            # Truncate long strings for display
             name = str(rule['name'])[:28] + '..' if len(str(rule['name'])) > 30 else rule['name']
             categories = str(rule['url_categories'])[:38] + '..' if len(str(rule['url_categories'])) > 40 else rule['url_categories']
             desc = str(rule['description'])[:28] + '..' if len(str(rule['description'])) > 30 else rule['description']
@@ -239,13 +258,11 @@ class ZscalerAutomation:
                 logger.warning(f"⚠️  Rule '{rule_name}' not found")
                 return None
                 
-            # Find exact match first
             for rule in rules:
                 if rule.name.lower() == rule_name.lower():
                     logger.info(f"✅ Found rule: {rule.name} (ID: {rule.id})")
                     return rule
             
-            # If no exact match, use first result
             if len(rules) > 1:
                 logger.warning(f"⚠️  Multiple rules found matching '{rule_name}'. Using first match.")
                 
@@ -377,19 +394,10 @@ def main():
 Cloud: zscalerbeta (zsapi.zscalerbeta.net/api/v1)
 
 Examples:
-  # List all rules in table format
   python zscaler_url_automation.py --list-rules
-  
-  # Export rules to CSV
   python zscaler_url_automation.py --list-rules --format csv
-  
-  # Add URL category to existing rule
   python zscaler_url_automation.py --rule-name "Block Social Media" --add-category "STREAMING_MEDIA"
-  
-  # Update rule action
   python zscaler_url_automation.py --rule-name "Allow Finance" --action ALLOW
-  
-  # Block URL (requires custom category setup)
   python zscaler_url_automation.py --rule-name "Block Malicious" --block-url "badsite.com"
         """
     )
@@ -409,6 +417,11 @@ Examples:
                         help='Update rule action')
     
     args = parser.parse_args()
+    
+    # Check SDK availability before proceeding
+    if not SDK_AVAILABLE:
+        logger.error("❌ Zscaler SDK not installed. Run: pip install zscaler-sdk-python")
+        sys.exit(1)
     
     # Initialize automation client
     zscaler = ZscalerAutomation()
