@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Zscaler URL Filtering Automation Script
-Uses Official zscaler-sdk-python with Native Authentication
+Uses Official zscaler-sdk-python with LegacyZIAClient (for non-Zidentity tenants)
 
 This script requires the following environment variables:
   ZIA_USERNAME  - Your ZIA admin username (email)
@@ -27,15 +27,38 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def check_dependencies():
-    """Check if required dependencies are installed"""
+def get_zia_client():
+    """
+    Get ZIA client - tries multiple import paths for compatibility
+    Returns the appropriate client class
+    """
+    # Try newer SDK first (v1.0+)
+    try:
+        from zscaler.oneapi_client import LegacyZIAClient
+        logger.info("📦 Using zscaler-sdk-python (LegacyZIAClient)")
+        return LegacyZIAClient, "legacy"
+    except ImportError:
+        pass
+    
+    # Try older SDK import path
     try:
         from zscaler.zia import ZIAClientHelper
-        return True
+        logger.info("📦 Using zscaler-sdk-python (ZIAClientHelper)")
+        return ZIAClientHelper, "helper"
     except ImportError:
-        logger.error("❌ Missing required package: zscaler-sdk-python")
-        logger.error("   Install it with: pip install zscaler-sdk-python")
-        return False
+        pass
+    
+    # Try direct import
+    try:
+        from zscaler import ZIAClientHelper
+        logger.info("📦 Using zscaler-sdk-python (direct ZIAClientHelper)")
+        return ZIAClientHelper, "helper"
+    except ImportError:
+        pass
+    
+    logger.error("❌ Could not import Zscaler SDK")
+    logger.error("   Install with: pip install zscaler-sdk-python")
+    return None, None
 
 
 class ZscalerURLAutomation:
@@ -43,8 +66,6 @@ class ZscalerURLAutomation:
     
     def __init__(self):
         """Initialize automation with ZIA client using Native Authentication"""
-        # Import here to allow dependency check first
-        from zscaler.zia import ZIAClientHelper
         
         # Get credentials from environment variables
         self.username = os.environ.get('ZIA_USERNAME')
@@ -76,15 +97,38 @@ class ZscalerURLAutomation:
         logger.info(f"👤 Username: {self.username}")
         logger.info(f"🔑 API Key length: {len(self.api_key)}")
         
+        # Get the appropriate client class
+        ClientClass, client_type = get_zia_client()
+        
+        if ClientClass is None:
+            sys.exit(1)
+        
+        self.client_type = client_type
+        
         try:
-            # Initialize ZIA client with Native Authentication
-            # The SDK handles the API key obfuscation and session management automatically
-            self.client = ZIAClientHelper(
-                username=self.username,
-                password=self.password,
-                api_key=self.api_key,
-                cloud=self.cloud
-            )
+            if client_type == "legacy":
+                # New SDK using LegacyZIAClient with config dict
+                config = {
+                    "username": self.username,
+                    "password": self.password,
+                    "api_key": self.api_key,
+                    "cloud": self.cloud,
+                    "logging": {"enabled": False, "verbose": False}
+                }
+                self.client = ClientClass(config)
+                # For LegacyZIAClient, we need to enter the context
+                self.client.__enter__()
+                self.zia = self.client.zia
+            else:
+                # Older SDK using ZIAClientHelper with keyword args
+                self.client = ClientClass(
+                    username=self.username,
+                    password=self.password,
+                    api_key=self.api_key,
+                    cloud=self.cloud
+                )
+                self.zia = self.client
+            
             logger.info("✅ Successfully authenticated to Zscaler ZIA API")
             
         except Exception as e:
@@ -97,6 +141,14 @@ class ZscalerURLAutomation:
             logger.error("  4. API access not enabled for your admin account")
             sys.exit(1)
     
+    def __del__(self):
+        """Cleanup - exit context manager if using LegacyZIAClient"""
+        if hasattr(self, 'client_type') and self.client_type == "legacy":
+            try:
+                self.client.__exit__(None, None, None)
+            except:
+                pass
+    
     def list_rules(self, format_type: str = "table") -> None:
         """
         List all URL filtering rules
@@ -108,36 +160,33 @@ class ZscalerURLAutomation:
         
         try:
             # Use the SDK's url_filtering interface
-            rules = self.client.url_filtering.list_rules()
+            if self.client_type == "legacy":
+                # New SDK returns tuple: (data, response, error)
+                rules, response, error = self.zia.url_filtering_rules.list_rules()
+                if error:
+                    logger.error(f"❌ API Error: {error}")
+                    sys.exit(1)
+            else:
+                # Older SDK returns data directly
+                rules = self.zia.url_filtering.list_rules()
             
             if not rules:
                 logger.warning("⚠️ No URL filtering rules found")
                 return
             
-            # Convert BoxList to regular list if needed
-            rules_list = list(rules) if hasattr(rules, '__iter__') else [rules]
+            # Ensure we have a list
+            rules_list = list(rules) if hasattr(rules, '__iter__') and not isinstance(rules, dict) else [rules]
             
             logger.info(f"✅ Found {len(rules_list)} URL filtering rules")
             
             if format_type == "json":
-                # Convert to serializable format
-                output = []
-                for rule in rules_list:
-                    if hasattr(rule, 'to_dict'):
-                        output.append(rule.to_dict())
-                    elif hasattr(rule, 'as_dict'):
-                        output.append(rule.as_dict())
-                    elif isinstance(rule, dict):
-                        output.append(rule)
-                    else:
-                        output.append(dict(rule))
-                print(json.dumps(output, indent=2, default=str))
+                print(json.dumps(rules_list, indent=2, default=str))
                 
             elif format_type == "simple":
                 for rule in rules_list:
-                    rule_id = getattr(rule, 'id', rule.get('id', 'N/A') if isinstance(rule, dict) else 'N/A')
-                    name = getattr(rule, 'name', rule.get('name', 'N/A') if isinstance(rule, dict) else 'N/A')
-                    action = getattr(rule, 'action', rule.get('action', 'N/A') if isinstance(rule, dict) else 'N/A')
+                    rule_id = rule.get('id', 'N/A') if isinstance(rule, dict) else getattr(rule, 'id', 'N/A')
+                    name = rule.get('name', 'N/A') if isinstance(rule, dict) else getattr(rule, 'name', 'N/A')
+                    action = rule.get('action', 'N/A') if isinstance(rule, dict) else getattr(rule, 'action', 'N/A')
                     print(f"{rule_id} - {name} - {action}")
                     
             else:  # table format
@@ -146,7 +195,6 @@ class ZscalerURLAutomation:
                 print("="*120)
                 
                 for rule in rules_list:
-                    # Handle both object and dict access patterns
                     if isinstance(rule, dict):
                         rule_id = str(rule.get('id', 'N/A'))
                         name = str(rule.get('name', 'N/A'))[:38]
@@ -166,6 +214,8 @@ class ZscalerURLAutomation:
                 
         except Exception as e:
             logger.error(f"❌ Failed to list rules: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
     
     def get_rule_by_name(self, rule_name: str) -> Optional[Dict[str, Any]]:
@@ -179,10 +229,15 @@ class ZscalerURLAutomation:
             Rule dictionary if found, None otherwise
         """
         try:
-            rules = self.client.url_filtering.list_rules()
+            if self.client_type == "legacy":
+                rules, response, error = self.zia.url_filtering_rules.list_rules()
+                if error:
+                    logger.error(f"❌ API Error: {error}")
+                    return None
+            else:
+                rules = self.zia.url_filtering.list_rules()
             
             for rule in rules:
-                # Handle both object and dict access
                 if isinstance(rule, dict):
                     r_name = rule.get('name', '')
                     r_id = str(rule.get('id', ''))
@@ -191,15 +246,7 @@ class ZscalerURLAutomation:
                     r_id = str(getattr(rule, 'id', ''))
                 
                 if r_name == rule_name or r_id == rule_name:
-                    # Convert to dict for consistent handling
-                    if hasattr(rule, 'to_dict'):
-                        return rule.to_dict()
-                    elif hasattr(rule, 'as_dict'):
-                        return rule.as_dict()
-                    elif isinstance(rule, dict):
-                        return rule
-                    else:
-                        return dict(rule)
+                    return rule if isinstance(rule, dict) else dict(rule)
             
             logger.error(f"❌ Rule '{rule_name}' not found")
             return None
@@ -221,7 +268,6 @@ class ZscalerURLAutomation:
         """
         logger.info(f"➕ Adding category '{category_id}' to rule '{rule_name}'...")
         
-        # Get the rule
         rule = self.get_rule_by_name(rule_name)
         if not rule:
             return False
@@ -229,20 +275,27 @@ class ZscalerURLAutomation:
         rule_id = rule['id']
         current_categories = rule.get('urlCategories', [])
         
-        # Check if category already exists
         if category_id in current_categories:
             logger.warning(f"⚠️ Category '{category_id}' already exists in rule '{rule_name}'")
             return True
         
-        # Add the new category
         new_categories = current_categories + [category_id]
         
         try:
-            # Update the rule using SDK
-            self.client.url_filtering.update_rule(
-                rule_id=rule_id,
-                url_categories=new_categories
-            )
+            if self.client_type == "legacy":
+                updated, response, error = self.zia.url_filtering_rules.update_rule(
+                    rule_id=rule_id,
+                    url_categories=new_categories
+                )
+                if error:
+                    logger.error(f"❌ API Error: {error}")
+                    return False
+            else:
+                self.zia.url_filtering.update_rule(
+                    rule_id=rule_id,
+                    url_categories=new_categories
+                )
+            
             logger.info(f"✅ Successfully added category '{category_id}' to rule '{rule_name}'")
             return True
             
@@ -263,7 +316,6 @@ class ZscalerURLAutomation:
         """
         logger.info(f"🚫 Blocking URL '{url}' in rule '{rule_name}'...")
         
-        # Get the rule
         rule = self.get_rule_by_name(rule_name)
         if not rule:
             return False
@@ -271,20 +323,27 @@ class ZscalerURLAutomation:
         rule_id = rule['id']
         current_urls = rule.get('blockOverride', [])
         
-        # Check if URL already exists
         if url in current_urls:
             logger.warning(f"⚠️ URL '{url}' is already blocked in rule '{rule_name}'")
             return True
         
-        # Add the new URL
         new_urls = current_urls + [url]
         
         try:
-            # Update the rule using SDK
-            self.client.url_filtering.update_rule(
-                rule_id=rule_id,
-                block_override=new_urls
-            )
+            if self.client_type == "legacy":
+                updated, response, error = self.zia.url_filtering_rules.update_rule(
+                    rule_id=rule_id,
+                    block_override=new_urls
+                )
+                if error:
+                    logger.error(f"❌ API Error: {error}")
+                    return False
+            else:
+                self.zia.url_filtering.update_rule(
+                    rule_id=rule_id,
+                    block_override=new_urls
+                )
+            
             logger.info(f"✅ Successfully blocked URL '{url}' in rule '{rule_name}'")
             return True
             
@@ -305,13 +364,11 @@ class ZscalerURLAutomation:
         """
         logger.info(f"🔄 Updating rule '{rule_name}' action to '{action}'...")
         
-        # Validate action
         valid_actions = ['ALLOW', 'BLOCK', 'CAUTION', 'ISOLATE']
         if action.upper() not in valid_actions:
             logger.error(f"❌ Invalid action '{action}'. Must be one of: {', '.join(valid_actions)}")
             return False
         
-        # Get the rule
         rule = self.get_rule_by_name(rule_name)
         if not rule:
             return False
@@ -319,11 +376,20 @@ class ZscalerURLAutomation:
         rule_id = rule['id']
         
         try:
-            # Update the rule using SDK
-            self.client.url_filtering.update_rule(
-                rule_id=rule_id,
-                action=action.upper()
-            )
+            if self.client_type == "legacy":
+                updated, response, error = self.zia.url_filtering_rules.update_rule(
+                    rule_id=rule_id,
+                    action=action.upper()
+                )
+                if error:
+                    logger.error(f"❌ API Error: {error}")
+                    return False
+            else:
+                self.zia.url_filtering.update_rule(
+                    rule_id=rule_id,
+                    action=action.upper()
+                )
+            
             logger.info(f"✅ Successfully updated rule '{rule_name}' action to '{action}'")
             return True
             
@@ -341,33 +407,29 @@ class ZscalerURLAutomation:
         logger.info("📋 Fetching URL categories...")
         
         try:
-            categories = self.client.url_categories.list_categories()
+            if self.client_type == "legacy":
+                categories, response, error = self.zia.url_categories.list_categories()
+                if error:
+                    logger.error(f"❌ API Error: {error}")
+                    sys.exit(1)
+            else:
+                categories = self.zia.url_categories.list_categories()
             
             if not categories:
                 logger.warning("⚠️ No URL categories found")
                 return
             
-            categories_list = list(categories) if hasattr(categories, '__iter__') else [categories]
+            categories_list = list(categories) if hasattr(categories, '__iter__') and not isinstance(categories, dict) else [categories]
             
             logger.info(f"✅ Found {len(categories_list)} URL categories")
             
             if format_type == "json":
-                output = []
-                for cat in categories_list:
-                    if hasattr(cat, 'to_dict'):
-                        output.append(cat.to_dict())
-                    elif hasattr(cat, 'as_dict'):
-                        output.append(cat.as_dict())
-                    elif isinstance(cat, dict):
-                        output.append(cat)
-                    else:
-                        output.append(dict(cat))
-                print(json.dumps(output, indent=2, default=str))
+                print(json.dumps(categories_list, indent=2, default=str))
                 
             elif format_type == "simple":
                 for cat in categories_list:
-                    cat_id = getattr(cat, 'id', cat.get('id', 'N/A') if isinstance(cat, dict) else 'N/A')
-                    name = getattr(cat, 'configuredName', cat.get('configuredName', 'N/A') if isinstance(cat, dict) else 'N/A')
+                    cat_id = cat.get('id', 'N/A') if isinstance(cat, dict) else getattr(cat, 'id', 'N/A')
+                    name = cat.get('configuredName', cat.get('id', 'N/A')) if isinstance(cat, dict) else getattr(cat, 'configuredName', getattr(cat, 'id', 'N/A'))
                     print(f"{cat_id} - {name}")
                     
             else:  # table format
@@ -391,6 +453,8 @@ class ZscalerURLAutomation:
                 
         except Exception as e:
             logger.error(f"❌ Failed to list categories: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
 
 
@@ -424,15 +488,6 @@ Environment Variables Required:
   ZIA_PASSWORD   - Your ZIA admin password
   ZIA_API_KEY    - Your ZIA API key from Administration → API Key Management
   ZIA_CLOUD      - Your ZIA cloud name (default: zscalerbeta)
-                   Options: zscalerbeta, zscaler, zscalerone, zscalertwo, zscalerthree, zscloud
-
-Cloud Name Reference (based on your admin portal URL):
-  admin.zscalerbeta.net  → ZIA_CLOUD=zscalerbeta
-  admin.zscaler.net      → ZIA_CLOUD=zscaler
-  admin.zscalerone.net   → ZIA_CLOUD=zscalerone
-  admin.zscalertwo.net   → ZIA_CLOUD=zscalertwo
-  admin.zscalerthree.net → ZIA_CLOUD=zscalerthree
-  admin.zscloud.net      → ZIA_CLOUD=zscloud
         """
     )
     
@@ -464,10 +519,6 @@ Cloud Name Reference (based on your admin portal URL):
     
     if (args.add_category or args.block_url or args.update_action) and not args.rule_name:
         parser.error("--rule-name is required for add-category, block-url, and update-action operations")
-    
-    # Check dependencies first
-    if not check_dependencies():
-        sys.exit(1)
     
     # Initialize automation
     automation = ZscalerURLAutomation()
