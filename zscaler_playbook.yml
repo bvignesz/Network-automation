@@ -1,5 +1,18 @@
 ---
-- name: Zscaler URL Filtering Automation (Direct HTTP API)
+# =============================================================================
+# Zscaler URL Filtering Automation Playbook
+# Uses Official zscaler-sdk-python with Native Authentication
+# =============================================================================
+# 
+# REQUIRED ENVIRONMENT VARIABLES (set in Semaphore):
+#   ZIA_USERNAME  - Your ZIA admin username (email)
+#   ZIA_PASSWORD  - Your ZIA admin password  
+#   ZIA_API_KEY   - Your ZIA API key from Admin Portal → Administration → API Key Management
+#   ZIA_CLOUD     - Your ZIA cloud name (e.g., zscalerbeta, zscaler, zscalerone)
+#
+# =============================================================================
+
+- name: Zscaler URL Filtering Automation (Official SDK)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -9,17 +22,22 @@
     venv_python: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3"
     venv_pip: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3 -m pip"
     
-    # Script location
-    script_path: "/tmp/semaphore/project_1/repository_3_template_11/zscaler_url_automation.py"
+    # Script location - Update this path to match your repository structure
+    script_path: "{{ playbook_dir }}/zscaler_url_automation.py"
     
-    # Zscaler credentials for Cloud Service API Key authentication
-    zscaler_api_key: "{{ lookup('env', 'ZSCALER_API_KEY') }}"
-    zscaler_base_url: "{{ lookup('env', 'ZSCALER_BASE_URL') | default('https://zsapi.zscalerbeta.net/api/v1', true) }}"
+    # Zscaler credentials from environment variables
+    # These are read from Semaphore Environment settings
+    zia_username: "{{ lookup('env', 'ZIA_USERNAME') }}"
+    zia_password: "{{ lookup('env', 'ZIA_PASSWORD') }}"
+    zia_api_key: "{{ lookup('env', 'ZIA_API_KEY') }}"
+    zia_cloud: "{{ lookup('env', 'ZIA_CLOUD') | default('zscalerbeta', true) }}"
     
-    # Operation name mapping
+    # Operation name mapping for user-friendly names
     operation_map:
       "List All Rules": "list"
       "list": "list"
+      "List Categories": "list-categories"
+      "list-categories": "list-categories"
       "Add URL Category": "add-category"
       "add-category": "add-category"
       "Block URL": "block-url"
@@ -27,7 +45,7 @@
       "Update Rule Action": "update-action"
       "update-action": "update-action"
     
-    # Operation parameters
+    # Operation parameters (set via Semaphore survey/extra vars)
     selected_operation: "{{ operation_map[operation | default('list')] | default('list') }}"
     selected_rule_name: "{{ rule_name | default('') }}"
     selected_category_id: "{{ category_id | default('') }}"
@@ -40,12 +58,36 @@
     # PREREQUISITE CHECKS
     # ============================================================================
     
+    - name: Display configuration info
+      debug:
+        msg: |
+          ========================================
+          Zscaler URL Filtering Automation
+          ========================================
+          Cloud: {{ zia_cloud }}
+          Username: {{ zia_username | default('NOT SET', true) }}
+          API Key Set: {{ 'Yes' if zia_api_key | length > 0 else 'No' }}
+          Operation: {{ selected_operation }}
+          ========================================
+      tags: always
+
     - name: Validate required credentials
       assert:
         that:
-          - zscaler_api_key | length > 0
-        fail_msg: "Missing required Zscaler API key. Check ZSCALER_API_KEY environment variable."
-        success_msg: "API key is present"
+          - zia_username | length > 0
+          - zia_password | length > 0
+          - zia_api_key | length > 0
+        fail_msg: |
+          Missing required Zscaler credentials!
+          
+          Please set the following environment variables in Semaphore:
+            ZIA_USERNAME  - Your ZIA admin email
+            ZIA_PASSWORD  - Your ZIA admin password
+            ZIA_API_KEY   - Your ZIA API key from Administration → API Key Management
+            ZIA_CLOUD     - Your cloud name (default: zscalerbeta)
+          
+          Go to Semaphore → Project → Environment → Edit to add these variables.
+        success_msg: "✅ All required credentials are present"
       tags: always
 
     - name: Check if automation script exists
@@ -56,15 +98,25 @@
 
     - name: Fail if script is missing
       fail:
-        msg: "Automation script not found at {{ script_path }}"
+        msg: |
+          Automation script not found at {{ script_path }}
+          
+          Make sure zscaler_url_automation.py is in your repository.
       when: not script_stat.stat.exists
       tags: always
 
-    - name: Install requests library (only dependency)
-      command: "{{ venv_pip }} install requests --quiet"
+    - name: Install zscaler-sdk-python package
+      command: "{{ venv_pip }} install zscaler-sdk-python --quiet --upgrade"
       register: pip_install
       changed_when: "'Successfully installed' in pip_install.stdout"
       failed_when: pip_install.rc != 0
+      tags: always
+
+    - name: Verify SDK installation
+      command: "{{ venv_python }} -c 'from zscaler.zia import ZIAClientHelper; print(\"SDK OK\")'"
+      register: sdk_check
+      changed_when: false
+      failed_when: sdk_check.rc != 0
       tags: always
 
     # ============================================================================
@@ -78,8 +130,10 @@
         --format {{ selected_report_format }}
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
+        ZIA_USERNAME: "{{ zia_username }}"
+        ZIA_PASSWORD: "{{ zia_password }}"
+        ZIA_API_KEY: "{{ zia_api_key }}"
+        ZIA_CLOUD: "{{ zia_cloud }}"
       register: list_output
       when: selected_operation == 'list'
       tags: always
@@ -91,6 +145,34 @@
         - selected_operation == 'list'
         - list_output is defined
         - list_output.stdout_lines is defined
+      tags: always
+
+    # ============================================================================
+    # OPERATION: LIST URL CATEGORIES
+    # ============================================================================
+    
+    - name: List all URL categories
+      command: >
+        {{ venv_python }} {{ script_path }}
+        --list-categories
+        --format {{ selected_report_format }}
+      environment:
+        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
+        ZIA_USERNAME: "{{ zia_username }}"
+        ZIA_PASSWORD: "{{ zia_password }}"
+        ZIA_API_KEY: "{{ zia_api_key }}"
+        ZIA_CLOUD: "{{ zia_cloud }}"
+      register: categories_output
+      when: selected_operation == 'list-categories'
+      tags: always
+
+    - name: Display categories list
+      debug:
+        msg: "{{ categories_output.stdout_lines }}"
+      when: 
+        - selected_operation == 'list-categories'
+        - categories_output is defined
+        - categories_output.stdout_lines is defined
       tags: always
 
     # ============================================================================
@@ -113,8 +195,10 @@
         --add-category "{{ selected_category_id }}"
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
+        ZIA_USERNAME: "{{ zia_username }}"
+        ZIA_PASSWORD: "{{ zia_password }}"
+        ZIA_API_KEY: "{{ zia_api_key }}"
+        ZIA_CLOUD: "{{ zia_cloud }}"
       register: add_category_output
       when: 
         - selected_operation == 'add-category'
@@ -151,8 +235,10 @@
         --block-url "{{ selected_url_to_block }}"
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
+        ZIA_USERNAME: "{{ zia_username }}"
+        ZIA_PASSWORD: "{{ zia_password }}"
+        ZIA_API_KEY: "{{ zia_api_key }}"
+        ZIA_CLOUD: "{{ zia_cloud }}"
       register: block_url_output
       when:
         - selected_operation == 'block-url'
@@ -178,8 +264,8 @@
         that:
           - selected_rule_name | length > 0
           - selected_action | length > 0
-          - selected_action in ['ALLOW', 'BLOCK', 'CAUTION']
-        fail_msg: "Both rule_name and valid action (ALLOW/BLOCK/CAUTION) are required for update-action operation"
+          - selected_action in ['ALLOW', 'BLOCK', 'CAUTION', 'ISOLATE']
+        fail_msg: "Both rule_name and valid action (ALLOW/BLOCK/CAUTION/ISOLATE) are required for update-action operation"
       when: selected_operation == 'update-action'
       tags: always
 
@@ -190,8 +276,10 @@
         --update-action "{{ selected_action }}"
       environment:
         PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
-        ZSCALER_API_KEY: "{{ zscaler_api_key }}"
-        ZSCALER_BASE_URL: "{{ zscaler_base_url }}"
+        ZIA_USERNAME: "{{ zia_username }}"
+        ZIA_PASSWORD: "{{ zia_password }}"
+        ZIA_API_KEY: "{{ zia_api_key }}"
+        ZIA_CLOUD: "{{ zia_cloud }}"
       register: update_action_output
       when:
         - selected_operation == 'update-action'
@@ -218,11 +306,12 @@
           ========================================
           Zscaler URL Filtering Automation Summary
           ========================================
+          Cloud: {{ zia_cloud }}
           Operation: {{ selected_operation }}
           Rule Name: {{ selected_rule_name | default('N/A') }}
           Category ID: {{ selected_category_id | default('N/A') }}
           URL to Block: {{ selected_url_to_block | default('N/A') }}
           Action: {{ selected_action | default('N/A') }}
-          Status: {% if (list_output is defined and list_output is not skipped and list_output.rc == 0) or (add_category_output is defined and add_category_output is not skipped and add_category_output.rc == 0) or (block_url_output is defined and block_url_output is not skipped and block_url_output.rc == 0) or (update_action_output is defined and update_action_output is not skipped and update_action_output.rc == 0) %}SUCCESS{% else %}COMPLETED{% endif %}
+          Status: {% if (list_output is defined and list_output is not skipped and list_output.rc == 0) or (categories_output is defined and categories_output is not skipped and categories_output.rc == 0) or (add_category_output is defined and add_category_output is not skipped and add_category_output.rc == 0) or (block_url_output is defined and block_url_output is not skipped and block_url_output.rc == 0) or (update_action_output is defined and update_action_output is not skipped and update_action_output.rc == 0) %}SUCCESS{% else %}COMPLETED{% endif %}
           ========================================
       tags: always
