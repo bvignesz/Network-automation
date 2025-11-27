@@ -1,22 +1,6 @@
 ---
 # =============================================================================
-# Zscaler URL Filtering Automation Playbook
-# Uses Official zscaler-sdk-python with Native Authentication
-# =============================================================================
-# 
-# REQUIRED ENVIRONMENT VARIABLES (set in Semaphore):
-#   ZIA_USERNAME  - Your ZIA admin username (email)
-#   ZIA_PASSWORD  - Your ZIA admin password  
-#   ZIA_API_KEY   - Your ZIA API key from Admin Portal → Administration → API Key Management
-#   ZIA_CLOUD     - Your ZIA cloud name (e.g., zscalerbeta, zscaler, zscalerone)
-#
-# SURVEY VALUES SUPPORTED:
-#   - "list", "list-all-rules", "List All Rules" → lists URL filtering rules
-#   - "list-categories", "List Categories" → lists URL categories
-#   - "add-category", "Add URL Category" → adds category to rule
-#   - "block-url", "Block URL" → blocks URL in rule
-#   - "update-action", "Update Rule Action" → updates rule action
-#
+# Zscaler URL Filtering Automation Playbook (FIXED)
 # =============================================================================
 
 - name: Zscaler URL Filtering Automation (Official SDK)
@@ -29,7 +13,7 @@
     venv_python: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3"
     venv_pip: "/opt/semaphore/apps/ansible/11.1.0/venv/bin/python3 -m pip"
     
-    # Script location - Update this path to match your repository structure
+    # Script location
     script_path: "{{ playbook_dir }}/zscaler_url_automation.py"
     
     # Zscaler credentials from environment variables
@@ -38,26 +22,15 @@
     zia_api_key: "{{ lookup('env', 'ZIA_API_KEY') }}"
     zia_cloud: "{{ lookup('env', 'ZIA_CLOUD') | default('zscalerbeta', true) }}"
     
-    # Raw operation from Semaphore survey
-    raw_operation: "{{ operation | default('list') | lower | replace(' ', '-') }}"
+    # Raw operation from Semaphore survey - normalize it
+    raw_operation: "{{ operation | default('list') | lower | replace(' ', '-') | trim }}"
     
-    # Normalize operation to standard values
-    # This handles: "list", "list-all-rules", "list-all", etc. → all become "list"
-    selected_operation: >-
-      {% if 'list-all-rules' in raw_operation or raw_operation == 'list' or 'list-rules' in raw_operation %}list{% 
-      elif 'list-categories' in raw_operation or 'list-category' in raw_operation %}list-categories{% 
-      elif 'add-category' in raw_operation or 'add-url-category' in raw_operation %}add-category{% 
-      elif 'block-url' in raw_operation or 'block' in raw_operation %}block-url{% 
-      elif 'update-action' in raw_operation or 'update-rule' in raw_operation %}update-action{% 
-      else %}list{% endif %}
-    
-    # Operation parameters from Semaphore survey
-    # Variable names MUST match your Semaphore survey variable names exactly!
-    selected_rule_name: "{{ rule_name | default('') }}"
-    selected_category_id: "{{ url_category | default('') }}"
-    selected_url_to_block: "{{ block_url | default('') }}"
-    selected_action: "{{ rule_action | default('') }}"
-    selected_report_format: "{{ report_format | default('table') }}"
+    # Operation parameters from Semaphore survey (matching YOUR variable names)
+    selected_rule_name: "{{ rule_name | default('') | trim }}"
+    selected_category_id: "{{ url_category | default('') | trim }}"
+    selected_url_to_block: "{{ block_url | default('') | trim }}"
+    selected_action: "{{ rule_action | default('') | trim }}"
+    selected_report_format: "{{ report_format | default('table') | trim }}"
 
   tasks:
     # ============================================================================
@@ -73,8 +46,9 @@
           Cloud: {{ zia_cloud }}
           Username: {{ zia_username | default('NOT SET', true) }}
           API Key Set: {{ 'Yes' if zia_api_key | length > 0 else 'No' }}
-          Raw Operation: {{ raw_operation }}
-          Normalized Operation: {{ selected_operation }}
+          Operation: {{ raw_operation }}
+          Rule Name: {{ selected_rule_name }}
+          URL to Block: {{ selected_url_to_block }}
           ========================================
       tags: always
 
@@ -84,14 +58,7 @@
           - zia_username | length > 0
           - zia_password | length > 0
           - zia_api_key | length > 0
-        fail_msg: |
-          Missing required Zscaler credentials!
-          
-          Please set the following environment variables in Semaphore:
-            ZIA_USERNAME  - Your ZIA admin email
-            ZIA_PASSWORD  - Your ZIA admin password
-            ZIA_API_KEY   - Your ZIA API key from Administration → API Key Management
-            ZIA_CLOUD     - Your cloud name (default: zscalerbeta)
+        fail_msg: "Missing required Zscaler credentials!"
         success_msg: "✅ All required credentials are present"
       tags: always
 
@@ -131,22 +98,21 @@
         --list-rules
         --format {{ selected_report_format }}
       environment:
-        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZIA_USERNAME: "{{ zia_username }}"
         ZIA_PASSWORD: "{{ zia_password }}"
         ZIA_API_KEY: "{{ zia_api_key }}"
         ZIA_CLOUD: "{{ zia_cloud }}"
       register: list_output
-      when: selected_operation | trim == 'list'
+      when: raw_operation == 'list' or raw_operation == 'list-all-rules' or raw_operation == 'list-rules'
       tags: always
 
     - name: Display rules list
       debug:
         msg: "{{ list_output.stdout_lines }}"
       when: 
-        - selected_operation | trim == 'list'
         - list_output is defined
         - list_output.stdout_lines is defined
+        - list_output is not skipped
       tags: always
 
     # ============================================================================
@@ -159,51 +125,40 @@
         --list-categories
         --format {{ selected_report_format }}
       environment:
-        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZIA_USERNAME: "{{ zia_username }}"
         ZIA_PASSWORD: "{{ zia_password }}"
         ZIA_API_KEY: "{{ zia_api_key }}"
         ZIA_CLOUD: "{{ zia_cloud }}"
       register: categories_output
-      when: selected_operation | trim == 'list-categories'
+      when: raw_operation == 'list-categories'
       tags: always
 
     - name: Display categories list
       debug:
         msg: "{{ categories_output.stdout_lines }}"
       when: 
-        - selected_operation | trim == 'list-categories'
         - categories_output is defined
         - categories_output.stdout_lines is defined
+        - categories_output is not skipped
       tags: always
 
     # ============================================================================
     # OPERATION: ADD URL CATEGORY TO RULE
     # ============================================================================
     
-    - name: Validate parameters for add-category operation
-      assert:
-        that:
-          - selected_rule_name | length > 0
-          - selected_category_id | length > 0
-        fail_msg: "Both rule_name and category_id are required for add-category operation"
-      when: selected_operation | trim == 'add-category'
-      tags: always
-
     - name: Add URL category to rule
       command: >
         {{ venv_python }} {{ script_path }}
         --rule-name "{{ selected_rule_name }}"
         --add-category "{{ selected_category_id }}"
       environment:
-        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZIA_USERNAME: "{{ zia_username }}"
         ZIA_PASSWORD: "{{ zia_password }}"
         ZIA_API_KEY: "{{ zia_api_key }}"
         ZIA_CLOUD: "{{ zia_cloud }}"
       register: add_category_output
       when: 
-        - selected_operation | trim == 'add-category'
+        - raw_operation == 'add-category'
         - selected_rule_name | length > 0
         - selected_category_id | length > 0
       tags: always
@@ -212,38 +167,28 @@
       debug:
         msg: "{{ add_category_output.stdout_lines }}"
       when: 
-        - selected_operation | trim == 'add-category'
         - add_category_output is defined
         - add_category_output.stdout_lines is defined
+        - add_category_output is not skipped
       tags: always
 
     # ============================================================================
     # OPERATION: BLOCK URL IN SPECIFIC RULE
     # ============================================================================
     
-    - name: Validate parameters for block-url operation
-      assert:
-        that:
-          - selected_rule_name | length > 0
-          - selected_url_to_block | length > 0
-        fail_msg: "Both rule_name and url_to_block are required for block-url operation"
-      when: selected_operation | trim == 'block-url'
-      tags: always
-
     - name: Block URL in specified rule
       command: >
         {{ venv_python }} {{ script_path }}
         --rule-name "{{ selected_rule_name }}"
         --block-url "{{ selected_url_to_block }}"
       environment:
-        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZIA_USERNAME: "{{ zia_username }}"
         ZIA_PASSWORD: "{{ zia_password }}"
         ZIA_API_KEY: "{{ zia_api_key }}"
         ZIA_CLOUD: "{{ zia_cloud }}"
       register: block_url_output
       when:
-        - selected_operation | trim == 'block-url'
+        - raw_operation == 'block-url'
         - selected_rule_name | length > 0
         - selected_url_to_block | length > 0
       tags: always
@@ -252,39 +197,28 @@
       debug:
         msg: "{{ block_url_output.stdout_lines }}"
       when: 
-        - selected_operation | trim == 'block-url'
         - block_url_output is defined
         - block_url_output.stdout_lines is defined
+        - block_url_output is not skipped
       tags: always
 
     # ============================================================================
     # OPERATION: UPDATE RULE ACTION
     # ============================================================================
     
-    - name: Validate parameters for update-action operation
-      assert:
-        that:
-          - selected_rule_name | length > 0
-          - selected_action | length > 0
-          - selected_action in ['ALLOW', 'BLOCK', 'CAUTION', 'ISOLATE']
-        fail_msg: "Both rule_name and valid action (ALLOW/BLOCK/CAUTION/ISOLATE) are required"
-      when: selected_operation | trim == 'update-action'
-      tags: always
-
     - name: Update rule action
       command: >
         {{ venv_python }} {{ script_path }}
         --rule-name "{{ selected_rule_name }}"
         --update-action "{{ selected_action }}"
       environment:
-        PATH: "/opt/semaphore/apps/ansible/11.1.0/venv/bin:{{ ansible_env.PATH }}"
         ZIA_USERNAME: "{{ zia_username }}"
         ZIA_PASSWORD: "{{ zia_password }}"
         ZIA_API_KEY: "{{ zia_api_key }}"
         ZIA_CLOUD: "{{ zia_cloud }}"
       register: update_action_output
       when:
-        - selected_operation | trim == 'update-action'
+        - raw_operation == 'update-action'
         - selected_rule_name | length > 0
         - selected_action | length > 0
       tags: always
@@ -293,9 +227,9 @@
       debug:
         msg: "{{ update_action_output.stdout_lines }}"
       when: 
-        - selected_operation | trim == 'update-action'
         - update_action_output is defined
         - update_action_output.stdout_lines is defined
+        - update_action_output is not skipped
       tags: always
 
     # ============================================================================
@@ -306,15 +240,12 @@
       debug:
         msg: |
           ========================================
-          Zscaler URL Filtering Automation Summary
+          Zscaler Automation Summary
           ========================================
-          Cloud: {{ zia_cloud }}
-          Raw Operation: {{ raw_operation }}
-          Normalized Operation: {{ selected_operation | trim }}
+          Operation: {{ raw_operation }}
           Rule Name: {{ selected_rule_name | default('N/A') }}
-          Category ID: {{ selected_category_id | default('N/A') }}
           URL to Block: {{ selected_url_to_block | default('N/A') }}
+          Category: {{ selected_category_id | default('N/A') }}
           Action: {{ selected_action | default('N/A') }}
-          Status: {% if (list_output is defined and list_output is not skipped and list_output.rc == 0) or (categories_output is defined and categories_output is not skipped and categories_output.rc == 0) or (add_category_output is defined and add_category_output is not skipped and add_category_output.rc == 0) or (block_url_output is defined and block_url_output is not skipped and block_url_output.rc == 0) or (update_action_output is defined and update_action_output is not skipped and update_action_output.rc == 0) %}SUCCESS{% else %}COMPLETED{% endif %}
           ========================================
       tags: always
