@@ -390,8 +390,8 @@ class ZscalerURLAutomation:
                 logger.error("❌ Could not find url_categories interface")
                 return None
             
-            # List existing categories to find our custom one
-            result = url_categories.list_categories(custom_only=True)
+            # List existing categories - no parameters, filter manually
+            result = url_categories.list_categories()
             
             categories = []
             if isinstance(result, tuple):
@@ -399,10 +399,14 @@ class ZscalerURLAutomation:
             else:
                 categories = result if result else []
             
-            # Look for existing category
+            logger.info(f"📋 Found {len(categories)} URL categories")
+            
+            # Look for existing custom category with our name
             for cat in categories:
                 cat_name = cat.get('configuredName', '') if isinstance(cat, dict) else getattr(cat, 'configuredName', '')
                 cat_id = cat.get('id', '') if isinstance(cat, dict) else getattr(cat, 'id', '')
+                custom = cat.get('customCategory', False) if isinstance(cat, dict) else getattr(cat, 'customCategory', False)
+                
                 if cat_name == category_name:
                     logger.info(f"✅ Found existing category: {cat_id}")
                     return str(cat_id)
