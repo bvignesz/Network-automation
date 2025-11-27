@@ -52,10 +52,11 @@
       else %}list{% endif %}
     
     # Operation parameters from Semaphore survey
+    # Variable names MUST match your Semaphore survey variable names exactly!
     selected_rule_name: "{{ rule_name | default('') }}"
-    selected_category_id: "{{ category_id | default('') }}"
-    selected_url_to_block: "{{ url_to_block | default('') }}"
-    selected_action: "{{ action | default('') }}"
+    selected_category_id: "{{ url_category | default('') }}"
+    selected_url_to_block: "{{ block_url | default('') }}"
+    selected_action: "{{ rule_action | default('') }}"
     selected_report_format: "{{ report_format | default('table') }}"
 
   tasks:
