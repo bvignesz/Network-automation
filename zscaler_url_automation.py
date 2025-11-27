@@ -416,9 +416,9 @@ class ZscalerURLAutomation:
             
             # Try different method signatures
             try:
-                # Method 1: Using keyword arguments matching SDK docs
+                # Method 1: Using configured_name with custom_category=True
                 new_cat = url_categories.add_url_category(
-                    name=category_name,
+                    configured_name=category_name,
                     super_category="USER_DEFINED",
                     urls=[],
                     description="Custom category for automated URL blocking",
@@ -427,7 +427,7 @@ class ZscalerURLAutomation:
             except TypeError as e1:
                 logger.info(f"Method 1 failed: {e1}, trying method 2...")
                 try:
-                    # Method 2: Using configured_name
+                    # Method 2: Without custom_category flag
                     new_cat = url_categories.add_url_category(
                         configured_name=category_name,
                         super_category="USER_DEFINED",
