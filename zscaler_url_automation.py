@@ -413,14 +413,39 @@ class ZscalerURLAutomation:
             
             # Create new category if not found
             logger.info(f"📝 Creating new custom category '{category_name}'...")
-            new_cat = url_categories.add_url_category(
-                configured_name=category_name,
-                super_category="OTHER_MISCELLANEOUS",
-                urls=[],
-                description="Custom category for automated URL blocking"
-            )
+            
+            # Try different method signatures
+            try:
+                # Method 1: Using keyword arguments matching SDK docs
+                new_cat = url_categories.add_url_category(
+                    name=category_name,
+                    super_category="USER_DEFINED",
+                    urls=[],
+                    description="Custom category for automated URL blocking",
+                    custom_category=True
+                )
+            except TypeError as e1:
+                logger.info(f"Method 1 failed: {e1}, trying method 2...")
+                try:
+                    # Method 2: Using configured_name
+                    new_cat = url_categories.add_url_category(
+                        configured_name=category_name,
+                        super_category="USER_DEFINED",
+                        urls=[]
+                    )
+                except TypeError as e2:
+                    logger.info(f"Method 2 failed: {e2}, trying method 3...")
+                    # Method 3: Positional arguments
+                    new_cat = url_categories.add_url_category(
+                        category_name,
+                        "USER_DEFINED",
+                        []
+                    )
             
             if isinstance(new_cat, tuple):
+                if len(new_cat) >= 3 and new_cat[2]:
+                    logger.error(f"❌ API Error creating category: {new_cat[2]}")
+                    return None
                 new_cat = new_cat[0] if new_cat[0] else None
             
             if new_cat:
@@ -428,6 +453,7 @@ class ZscalerURLAutomation:
                 logger.info(f"✅ Created new category with ID: {cat_id}")
                 return str(cat_id)
             
+            logger.error("❌ Failed to create category - no response")
             return None
             
         except Exception as e:
@@ -451,11 +477,36 @@ class ZscalerURLAutomation:
                 logger.error("❌ Could not find url_categories interface")
                 return False
             
-            # Add URL to category
-            result = url_categories.add_urls_to_category(
-                category_id=category_id,
-                urls=[url]
-            )
+            # Try different method signatures for adding URL
+            try:
+                # Method 1: add_urls_to_category
+                result = url_categories.add_urls_to_category(
+                    category_id=category_id,
+                    urls=[url]
+                )
+            except (TypeError, AttributeError) as e1:
+                logger.info(f"Method 1 failed: {e1}, trying update_category...")
+                try:
+                    # Method 2: Get category first, then update with new URL
+                    cat_result = url_categories.get_category(category_id)
+                    if isinstance(cat_result, tuple):
+                        cat_data = cat_result[0]
+                    else:
+                        cat_data = cat_result
+                    
+                    current_urls = cat_data.get('urls', []) if isinstance(cat_data, dict) else getattr(cat_data, 'urls', [])
+                    if url not in current_urls:
+                        new_urls = list(current_urls) + [url]
+                        result = url_categories.update_url_category(
+                            category_id=category_id,
+                            urls=new_urls
+                        )
+                    else:
+                        logger.warning(f"⚠️ URL '{url}' already exists in category")
+                        return True
+                except Exception as e2:
+                    logger.error(f"Method 2 also failed: {e2}")
+                    return False
             
             if isinstance(result, tuple) and len(result) >= 3 and result[2]:
                 # Check if it's already there
