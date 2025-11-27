@@ -46,7 +46,8 @@
       "update-action": "update-action"
     
     # Operation parameters (set via Semaphore survey/extra vars)
-    selected_operation: "{{ operation_map[operation | default('list')] | default('list') }}"
+    # Simplified - directly use the operation value, no dictionary lookup needed
+    selected_operation: "{{ (operation | default('list')) | lower | replace(' ', '-') }}"
     selected_rule_name: "{{ rule_name | default('') }}"
     selected_category_id: "{{ category_id | default('') }}"
     selected_url_to_block: "{{ url_to_block | default('') }}"
