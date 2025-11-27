@@ -344,8 +344,135 @@ class ZscalerURLAutomation:
             return False
     
     def block_url_in_rule(self, rule_name: str, url: str) -> bool:
-        """Add a URL to the block list of a rule"""
-        logger.info(f"🚫 Blocking URL '{url}' in rule '{rule_name}'...")
+        """
+        Block a URL by adding it to a custom URL category and associating with a rule.
+        
+        The correct Zscaler workflow is:
+        1. Create or find a custom URL category (e.g., "Blocked URLs - Automation")
+        2. Add the URL to that custom category
+        3. Add that category to the URL filtering rule
+        """
+        logger.info(f"🚫 Blocking URL '{url}' via custom URL category...")
+        
+        # Step 1: Get or create a custom URL category for blocked URLs
+        category_name = "Blocked_URLs_Automation"
+        category_id = self._get_or_create_block_category(category_name)
+        
+        if not category_id:
+            logger.error("❌ Failed to get or create block category")
+            return False
+        
+        # Step 2: Add the URL to the custom category
+        if not self._add_url_to_category(category_id, url):
+            return False
+        
+        # Step 3: Add the category to the rule (if not already there)
+        if rule_name:
+            if not self._add_category_to_rule(rule_name, category_id):
+                return False
+        
+        logger.info(f"✅ Successfully blocked URL '{url}'")
+        return True
+    
+    def _get_or_create_block_category(self, category_name: str) -> str:
+        """Get existing or create new custom URL category for blocking"""
+        logger.info(f"📂 Looking for custom category '{category_name}'...")
+        
+        try:
+            # Get URL categories interface
+            url_categories = None
+            for attr in ['url_categories', 'urlCategories']:
+                if hasattr(self.client.zia, attr):
+                    url_categories = getattr(self.client.zia, attr)
+                    break
+            
+            if not url_categories:
+                logger.error("❌ Could not find url_categories interface")
+                return None
+            
+            # List existing categories to find our custom one
+            result = url_categories.list_categories(custom_only=True)
+            
+            categories = []
+            if isinstance(result, tuple):
+                categories = result[0] if result[0] else []
+            else:
+                categories = result if result else []
+            
+            # Look for existing category
+            for cat in categories:
+                cat_name = cat.get('configuredName', '') if isinstance(cat, dict) else getattr(cat, 'configuredName', '')
+                cat_id = cat.get('id', '') if isinstance(cat, dict) else getattr(cat, 'id', '')
+                if cat_name == category_name:
+                    logger.info(f"✅ Found existing category: {cat_id}")
+                    return str(cat_id)
+            
+            # Create new category if not found
+            logger.info(f"📝 Creating new custom category '{category_name}'...")
+            new_cat = url_categories.add_url_category(
+                configured_name=category_name,
+                super_category="OTHER_MISCELLANEOUS",
+                urls=[],
+                description="Custom category for automated URL blocking"
+            )
+            
+            if isinstance(new_cat, tuple):
+                new_cat = new_cat[0] if new_cat[0] else None
+            
+            if new_cat:
+                cat_id = new_cat.get('id', '') if isinstance(new_cat, dict) else getattr(new_cat, 'id', '')
+                logger.info(f"✅ Created new category with ID: {cat_id}")
+                return str(cat_id)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error with custom category: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _add_url_to_category(self, category_id: str, url: str) -> bool:
+        """Add a URL to a custom URL category"""
+        logger.info(f"➕ Adding URL '{url}' to category '{category_id}'...")
+        
+        try:
+            url_categories = None
+            for attr in ['url_categories', 'urlCategories']:
+                if hasattr(self.client.zia, attr):
+                    url_categories = getattr(self.client.zia, attr)
+                    break
+            
+            if not url_categories:
+                logger.error("❌ Could not find url_categories interface")
+                return False
+            
+            # Add URL to category
+            result = url_categories.add_urls_to_category(
+                category_id=category_id,
+                urls=[url]
+            )
+            
+            if isinstance(result, tuple) and len(result) >= 3 and result[2]:
+                # Check if it's already there
+                if "already exists" in str(result[2]).lower():
+                    logger.warning(f"⚠️ URL '{url}' already exists in category")
+                    return True
+                logger.error(f"❌ API Error: {result[2]}")
+                return False
+            
+            logger.info(f"✅ Added URL '{url}' to category")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to add URL to category: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _add_category_to_rule(self, rule_name: str, category_id: str) -> bool:
+        """Add a custom category to a URL filtering rule"""
+        logger.info(f"🔗 Adding category '{category_id}' to rule '{rule_name}'...")
         
         url_filtering = self._get_url_filtering_interface()
         if not url_filtering:
@@ -356,22 +483,24 @@ class ZscalerURLAutomation:
             return False
         
         rule_id = rule.get('id') if isinstance(rule, dict) else getattr(rule, 'id', None)
-        current_urls = rule.get('blockOverride', []) if isinstance(rule, dict) else getattr(rule, 'blockOverride', [])
+        current_categories = rule.get('urlCategories', []) if isinstance(rule, dict) else getattr(rule, 'urlCategories', [])
         
-        if url in current_urls:
-            logger.warning(f"⚠️ URL '{url}' is already blocked in rule '{rule_name}'")
+        # Check if category already in rule
+        if category_id in current_categories:
+            logger.info(f"✅ Category already in rule")
             return True
         
-        new_urls = list(current_urls) + [url]
+        # Add new category
+        new_categories = list(current_categories) + [category_id]
         
         try:
-            result = url_filtering.update_rule(rule_id=rule_id, block_override=new_urls)
+            result = url_filtering.update_rule(rule_id=rule_id, url_categories=new_categories)
             
             if isinstance(result, tuple) and len(result) >= 3 and result[2]:
-                logger.error(f"❌ API Error: {result[2]}")
+                logger.error(f"❌ API Error: {json.dumps(result[2], indent=2)}")
                 return False
             
-            logger.info(f"✅ Successfully blocked URL '{url}' in rule '{rule_name}'")
+            logger.info(f"✅ Added category to rule")
             return True
             
         except Exception as e:
