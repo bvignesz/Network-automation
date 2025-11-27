@@ -113,7 +113,7 @@
       tags: always
 
     - name: Verify SDK installation
-      command: "{{ venv_python }} -c 'from zscaler.zia import ZIAClientHelper; print(\"SDK OK\")'"
+      command: "{{ venv_python }} -c 'from zscaler.oneapi_client import LegacyZIAClient; print(\"SDK OK\")'"
       register: sdk_check
       changed_when: false
       failed_when: sdk_check.rc != 0
