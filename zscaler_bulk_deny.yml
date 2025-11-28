@@ -1,22 +1,32 @@
 ---
 - name: Zscaler Denylist Bulk Management
   hosts: all
-  gather_facts: true  # Must be true to get ansible_date_time
+  gather_facts: false  # We'll gather facts manually when needed
   
   vars:
     mode: "deny"
     bulk_file_local: "{{ bulk_file | default('deny_urls.txt') }}"
-    # Use lookup('pipe', 'date +%s') as alternative to ansible_date_time.epoch
-    timestamp: "{{ lookup('pipe', 'date +%s') }}"
-    bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ timestamp }}.txt"
-    script_path: "/tmp/zscaler_url_automation_{{ timestamp }}.py"
-    log_file_remote: "/tmp/zscaler_automation_{{ timestamp }}.log"
     
     # Execution options
     dry_run: "{{ dry_run_mode | default(false) | bool }}"
     verbose: "{{ verbose_mode | default(false) | bool }}"
   
   tasks:
+    # ========================================================================
+    # Gather Facts (needed for ansible_date_time)
+    # ========================================================================
+    
+    - name: Gather facts for timestamp
+      setup:
+      tags: always
+
+    - name: Set dynamic file paths with timestamp
+      set_fact:
+        bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ ansible_date_time.epoch }}.txt"
+        script_path: "/tmp/zscaler_url_automation_{{ ansible_date_time.epoch }}.py"
+        log_file_remote: "/tmp/zscaler_automation_{{ ansible_date_time.epoch }}.log"
+      tags: always
+
     # ========================================================================
     # Pre-flight Checks
     # ========================================================================
@@ -44,7 +54,7 @@
           - lookup('env', 'ZIA_API_KEY') | length > 0
         fail_msg: |
           Missing Zscaler credentials!
-          Please configure Environment Variables in Semaphore:
+          Configure in Semaphore Environment Variables:
           - ZIA_USERNAME
           - ZIA_PASSWORD
           - ZIA_API_KEY
@@ -65,7 +75,6 @@
       fail:
         msg: |
           Bulk file not found: {{ bulk_file_local }}
-          Please ensure the file exists in the repository root.
           Expected location: {{ playbook_dir }}/{{ bulk_file_local }}
       when: not bulk_file_stat.stat.exists
       tags: always
@@ -75,7 +84,7 @@
         msg:
           - "File: {{ bulk_file_local }}"
           - "Size: {{ bulk_file_stat.stat.size }} bytes"
-          - "Lines: ~{{ (bulk_file_stat.stat.size / 30) | int }} (estimated)"
+          - "Lines: ~{{ (bulk_file_stat.stat.size / 30) | int }}"
       tags: always
 
     # ========================================================================
@@ -170,7 +179,7 @@
 
     - name: Display added URLs (successful update)
       debug:
-        msg: "{{ update_result.added }}"
+        msg: "Added URLs: {{ update_result.added }}"
       when: 
         - update_result is defined
         - update_result.added_count | default(0) > 0
@@ -179,7 +188,7 @@
 
     - name: Display would-be-added URLs (dry-run mode)
       debug:
-        msg: "{{ update_result.would_add }}"
+        msg: "Would add URLs: {{ update_result.would_add }}"
       when:
         - update_result is defined
         - dry_run
@@ -213,7 +222,7 @@
 
         - name: Fail playbook on error
           fail:
-            msg: "Script execution failed. Check logs for details."
+            msg: "Script execution failed. Check error details above."
       when:
         - update_result is defined
         - update_result.status == "error"
