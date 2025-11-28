@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Zscaler URL Filtering Automation Script
-Uses Official zscaler-sdk-python with LegacyZIAClient (for non-Zidentity tenants)
+Enterprise Zscaler ZIA URL Management Script
 
-This script requires the following environment variables:
-  ZIA_USERNAME  - Your ZIA admin username (email)
-  ZIA_PASSWORD  - Your ZIA admin password
-  ZIA_API_KEY   - Your ZIA API key from Admin Portal
-  ZIA_CLOUD     - Your ZIA cloud (e.g., zscalerbeta, zscaler, zscalerone, etc.)
+Supports:
+  - List current denylist/allowlist
+  - Bulk add URLs (with deduplication)
+  - Batch processing for large files
+  - Detailed logging
+  - JSON output for Ansible parsing
 
-Install: pip install zscaler-sdk-python
+Environment Variables:
+  ZIA_USERNAME
+  ZIA_PASSWORD
+  ZIA_API_KEY
+  ZIA_CLOUD (e.g., zscaler, zscalerbeta, zscalerone, etc.)
+
+Author: Network Automation Team
+Version: 2.0
 """
 
 import os
@@ -17,645 +24,657 @@ import sys
 import logging
 import argparse
 import json
-from typing import Optional, Dict, Any, List
+import time
+from typing import List, Dict, Tuple, Optional
+from datetime import datetime
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+import requests
 
+# ============================================================================
+# Logging Configuration
+# ============================================================================
 
-def clean_payload(payload: dict) -> dict:
-    """
-    Remove empty/None values from payload to avoid SDK sending empty arrays.
-    This prevents the HV000030 'keywords' validation error.
+def setup_logging(log_file: Optional[str] = None, verbose: bool = False):
+    """Configure logging with file and console handlers"""
+    log_level = logging.DEBUG if verbose else logging.INFO
     
-    Fields like keywords=[], ip_ranges=[], etc. cause Zscaler backend to reject the request.
-    """
-    return {k: v for k, v in payload.items() if v not in (None, [], {}, "")}
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    handlers = [logging.StreamHandler(sys.stderr)]
+    
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    
+    logging.basicConfig(
+        level=log_level,
+        format=log_format,
+        handlers=handlers
+    )
+    
+    return logging.getLogger(__name__)
 
 
-def get_zia_client():
+# ============================================================================
+# SDK Client Loader
+# ============================================================================
+
+def get_zia_client_class():
     """
-    Get ZIA client - tries multiple import paths for compatibility
-    Returns the appropriate client class and type
+    Dynamically load Zscaler SDK client class.
+    Tries multiple import paths for SDK version compatibility.
     """
-    # Try newer SDK first (v1.0+) - LegacyZIAClient
+    # Try newer oneapi_client structure
     try:
         from zscaler.oneapi_client import LegacyZIAClient
-        logger.info("📦 Using zscaler-sdk-python (LegacyZIAClient)")
-        return LegacyZIAClient, "legacy"
+        logging.info("✓ Loaded LegacyZIAClient from zscaler.oneapi_client")
+        return LegacyZIAClient
     except ImportError:
         pass
-    
-    # Try older SDK import path
+
+    # Try standard zia module
     try:
         from zscaler.zia import ZIAClientHelper
-        logger.info("📦 Using zscaler-sdk-python (ZIAClientHelper from zscaler.zia)")
-        return ZIAClientHelper, "helper"
+        logging.info("✓ Loaded ZIAClientHelper from zscaler.zia")
+        return ZIAClientHelper
     except ImportError:
         pass
-    
+
     # Try direct import
     try:
         from zscaler import ZIAClientHelper
-        logger.info("📦 Using zscaler-sdk-python (ZIAClientHelper direct)")
-        return ZIAClientHelper, "helper"
+        logging.info("✓ Loaded ZIAClientHelper from zscaler")
+        return ZIAClientHelper
     except ImportError:
         pass
-    
-    logger.error("❌ Could not import Zscaler SDK")
-    logger.error("   Install with: pip install zscaler-sdk-python")
-    return None, None
+
+    logging.error("✗ Failed to import Zscaler SDK")
+    logging.error("Run: pip install zscaler-sdk-python")
+    sys.exit(1)
 
 
-class ZscalerURLAutomation:
-    """Handles Zscaler URL filtering automation operations using official SDK"""
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+def normalize_urls(urls: List[str]) -> List[str]:
+    """
+    Normalize URL list: strip whitespace, remove empties, deduplicate.
+    Preserves original order.
+    """
+    seen = set()
+    normalized = []
     
-    def __init__(self):
-        """Initialize automation with ZIA client using Native Authentication"""
+    for url in urls:
+        url = url.strip()
         
-        # Get credentials from environment variables
-        self.username = os.environ.get('ZIA_USERNAME')
-        self.password = os.environ.get('ZIA_PASSWORD')
-        self.api_key = os.environ.get('ZIA_API_KEY')
-        self.cloud = os.environ.get('ZIA_CLOUD', 'zscalerbeta')
+        # Skip empty lines and comments
+        if not url or url.startswith('#'):
+            continue
         
-        # Validate credentials
-        missing_creds = []
-        if not self.username:
-            missing_creds.append('ZIA_USERNAME')
-        if not self.password:
-            missing_creds.append('ZIA_PASSWORD')
-        if not self.api_key:
-            missing_creds.append('ZIA_API_KEY')
+        # Case-insensitive deduplication
+        url_lower = url.lower()
+        if url_lower in seen:
+            logging.debug(f"Skipping duplicate: {url}")
+            continue
         
-        if missing_creds:
-            logger.error(f"❌ Missing required environment variables: {', '.join(missing_creds)}")
-            sys.exit(1)
+        seen.add(url_lower)
+        normalized.append(url)
+    
+    return normalized
+
+
+def read_urls_from_file(path: str) -> List[str]:
+    """Read URLs from file, one per line"""
+    if not os.path.isfile(path):
+        logging.error(f"✗ Bulk file not found: {path}")
+        sys.exit(1)
+    
+    logging.info(f"Reading URLs from: {path}")
+    
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception as e:
+        logging.error(f"✗ Failed to read file: {e}")
+        sys.exit(1)
+    
+    urls = normalize_urls(lines)
+    logging.info(f"✓ Loaded {len(urls)} unique URLs from file")
+    
+    return urls
+
+
+def validate_environment():
+    """Validate required environment variables are set"""
+    required_vars = ["ZIA_USERNAME", "ZIA_PASSWORD", "ZIA_API_KEY"]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    
+    if missing:
+        logging.error(f"✗ Missing required environment variables: {', '.join(missing)}")
+        sys.exit(1)
+    
+    logging.info("✓ Environment variables validated")
+
+
+# ============================================================================
+# Zscaler Manager Class
+# ============================================================================
+
+class ZscalerURLManager:
+    """
+    Manages Zscaler ZIA URL lists (denylist/allowlist) via SDK + direct API.
+    
+    Uses SDK for authentication, then direct HTTP for operations.
+    """
+    
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+        self.username = os.environ.get("ZIA_USERNAME")
+        self.password = os.environ.get("ZIA_PASSWORD")
+        self.api_key = os.environ.get("ZIA_API_KEY")
+        self.cloud = os.environ.get("ZIA_CLOUD", "zscaler")
         
-        logger.info("🔐 Initializing Zscaler ZIA client...")
-        logger.info(f"📍 Cloud: {self.cloud}")
-        logger.info(f"👤 Username: {self.username}")
-        logger.info(f"🔑 API Key length: {len(self.api_key)}")
+        validate_environment()
         
-        # Get the appropriate client class
-        ClientClass, client_type = get_zia_client()
+        # Initialize SDK client
+        ClientClass = get_zia_client_class()
+        config = {
+            "username": self.username,
+            "password": self.password,
+            "api_key": self.api_key,
+            "cloud": self.cloud,
+        }
         
-        if ClientClass is None:
-            sys.exit(1)
+        self.logger.info(f"Initializing ZIA client for cloud: {self.cloud}")
         
-        self.client_type = client_type
-        
-        # Initialize client with config dictionary (for SDK v1.x)
         try:
-            config = {
-                "username": self.username,
-                "password": self.password,
-                "api_key": self.api_key,
-                "cloud": self.cloud,
-                "logging": {
-                    "enabled": True,
-                    "verbose": False
-                }
-            }
-            
-            # For LegacyZIAClient, use context manager pattern for proper session handling
             self.client = ClientClass(config)
-            
-            # Enter context to authenticate
             self.client.__enter__()
-            
-            logger.info("✅ Successfully authenticated to Zscaler ZIA API")
-            
-            # Log available interfaces
-            if hasattr(self.client, 'zia'):
-                available = [attr for attr in dir(self.client.zia) if not attr.startswith('_')][:20]
-                logger.info(f"📋 Available ZIA interfaces: {', '.join(available)}...")
-            
+            self.logger.info("✓ SDK client initialized")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize SDK client: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"✗ Failed to initialize SDK client: {e}")
             sys.exit(1)
+        
+        # Extract session ID
+        self.session_id = self._extract_session_id()
+        if not self.session_id:
+            self.logger.error("✗ Failed to extract JSESSIONID from SDK")
+            sys.exit(1)
+        
+        self.logger.info("✓ Session ID extracted successfully")
+        
+        self.base_url = f"https://zsapi.{self.cloud}.net/api/v1"
+        self.logger.info(f"API Base URL: {self.base_url}")
     
     def __del__(self):
-        """Cleanup - exit context manager"""
-        if hasattr(self, 'client') and self.client:
-            try:
+        """Cleanup SDK client session"""
+        try:
+            if hasattr(self, 'client'):
                 self.client.__exit__(None, None, None)
-            except:
-                pass
+                self.logger.info("✓ SDK session closed")
+        except Exception:
+            pass
     
-    def _get_url_categories_api(self):
-        """Get the URL categories API from the SDK"""
-        for attr in ['url_categories', 'urlCategories']:
-            if hasattr(self.client.zia, attr):
-                return getattr(self.client.zia, attr)
-        return None
-    
-    def _get_url_filtering_api(self):
-        """Get the URL filtering rules API from the SDK"""
-        for attr in ['url_filtering_rules', 'urlFilteringRules', 'web_application_rules']:
-            if hasattr(self.client.zia, attr):
-                return getattr(self.client.zia, attr)
-        return None
-    
-    def _handle_sdk_response(self, result):
+    def _extract_session_id(self) -> str:
         """
-        Handle SDK response - can be tuple (result, response, error) or direct result
-        Returns: (data, error)
+        Extract JSESSIONID from SDK client.
+        Handles multiple SDK version structures.
         """
-        if isinstance(result, tuple):
-            if len(result) >= 3:
-                data, response, error = result[0], result[1], result[2]
-                if error:
-                    return None, error
-                return data, None
-            elif len(result) == 2:
-                return result[0], result[1]
-        return result, None
+        # Try newer oneapi_client style
+        if hasattr(self.client, "zia_legacy_client"):
+            legacy = self.client.zia_legacy_client
+            if hasattr(legacy, "session_id"):
+                return legacy.session_id
+        
+        # Try older style through request executor
+        if hasattr(self.client, "_request_executor"):
+            executor = self.client._request_executor
+            if hasattr(executor, "zia_legacy_client"):
+                legacy = executor.zia_legacy_client
+                if hasattr(legacy, "session_id"):
+                    return legacy.session_id
+        
+        return ""
     
-    def list_url_filtering_rules(self) -> List[Dict]:
-        """List all URL filtering rules using SDK"""
-        logger.info("📋 Listing URL filtering rules...")
+    def _request(
+        self, 
+        method: str, 
+        path: str, 
+        json_body=None,
+        retry_count: int = 3
+    ) -> requests.Response:
+        """
+        Execute HTTP request with retry logic.
+        
+        Args:
+            method: HTTP method (GET, PUT, POST, DELETE)
+            path: API endpoint path
+            json_body: Request body (for PUT/POST)
+            retry_count: Number of retries on failure
+        """
+        url = f"{self.base_url}{path}"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": f"JSESSIONID={self.session_id}"
+        }
+        
+        for attempt in range(1, retry_count + 1):
+            try:
+                self.logger.info(f"{method} {path} (attempt {attempt}/{retry_count})")
+                
+                resp = requests.request(
+                    method, 
+                    url, 
+                    headers=headers, 
+                    json=json_body, 
+                    timeout=60
+                )
+                
+                self.logger.info(f"Response: {resp.status_code}")
+                
+                if resp.status_code >= 400:
+                    self.logger.error(f"Error response: {resp.text[:500]}")
+                
+                return resp
+                
+            except requests.exceptions.RequestException as e:
+                self.logger.warning(f"Request failed (attempt {attempt}): {e}")
+                
+                if attempt < retry_count:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    self.logger.info(f"Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    self.logger.error(f"✗ Request failed after {retry_count} attempts")
+                    raise
+    
+    # ========================================================================
+    # Denylist Operations
+    # ========================================================================
+    
+    def get_denylist(self) -> List[str]:
+        """
+        Fetch current denylist URLs.
+        
+        Returns:
+            List of URLs currently in denylist
+        """
+        self.logger.info("Fetching current denylist...")
         
         try:
-            url_filtering = self._get_url_filtering_api()
+            resp = self._request("GET", "/security/advanced/blacklistUrls")
             
-            if not url_filtering:
-                logger.error("❌ Could not find URL filtering API in SDK")
-                return []
-            
-            # Try different method names
-            for method_name in ['list_rules', 'list_url_filtering_rules', 'get_rules', 'list']:
-                if hasattr(url_filtering, method_name):
-                    method = getattr(url_filtering, method_name)
-                    result = method()
-                    
-                    data, error = self._handle_sdk_response(result)
-                    
-                    if error:
-                        logger.error(f"SDK error: {error}")
-                        continue
-                    
-                    if data:
-                        rules = []
-                        for r in data:
-                            if hasattr(r, 'as_dict'):
-                                rules.append(r.as_dict())
-                            elif isinstance(r, dict):
-                                rules.append(r)
-                            else:
-                                rules.append(vars(r) if hasattr(r, '__dict__') else {"raw": str(r)})
-                        return rules
-            
-            logger.error("❌ No suitable method found for listing rules")
-            return []
-            
-        except Exception as e:
-            logger.error(f"❌ Error listing rules: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    def list_url_categories(self, custom_only: bool = False) -> List[Dict]:
-        """List URL categories using SDK"""
-        logger.info(f"📋 Listing URL categories (custom_only={custom_only})...")
-        
-        try:
-            url_categories = self._get_url_categories_api()
-            
-            if not url_categories:
-                logger.error("❌ Could not find URL categories API in SDK")
-                return []
-            
-            # Call list_categories with optional filter
-            result = url_categories.list_categories()
-            data, error = self._handle_sdk_response(result)
-            
-            if error:
-                logger.error(f"SDK error listing categories: {error}")
-                return []
-            
-            if not data:
-                return []
-            
-            categories = []
-            for cat in data:
-                if hasattr(cat, 'as_dict'):
-                    cat_dict = cat.as_dict()
-                elif isinstance(cat, dict):
-                    cat_dict = cat
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                # Handle different response formats
+                if isinstance(data, dict) and "blacklistUrls" in data:
+                    urls = data.get("blacklistUrls", [])
+                elif isinstance(data, list):
+                    urls = data
                 else:
-                    cat_dict = vars(cat) if hasattr(cat, '__dict__') else {"raw": str(cat)}
+                    urls = []
                 
-                # Filter for custom only if requested
-                if custom_only:
-                    if cat_dict.get('customCategory', False) or cat_dict.get('custom_category', False):
-                        categories.append(cat_dict)
-                else:
-                    categories.append(cat_dict)
-            
-            return categories
-            
-        except Exception as e:
-            logger.error(f"❌ Error listing categories: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    def _get_or_create_block_category(self, category_name: str = "Blocked_URLs_Automation") -> Optional[str]:
-        """
-        Get existing custom URL category for blocked URLs.
-        
-        NOTE: Category creation via API is broken on zscalerbeta (HV000030 error).
-        The category must be created manually in Zscaler UI first.
-        This method will find the existing category by name.
-        """
-        logger.info(f"📂 Looking for custom category '{category_name}'...")
-        
-        try:
-            url_categories = self._get_url_categories_api()
-            
-            if not url_categories:
-                logger.error("❌ Could not find URL categories API in SDK")
-                return None
-            
-            # Get all categories to check if ours exists (SDK works fine for GET)
-            result = url_categories.list_categories()
-            data, error = self._handle_sdk_response(result)
-            
-            if error:
-                logger.error(f"SDK error listing categories: {error}")
-                return None
-            
-            categories = data if data else []
-            logger.info(f"📋 Found {len(categories)} URL categories")
-            
-            # Log all custom categories for debugging
-            custom_cats = []
-            
-            # Look for existing custom category with our name
-            for cat in categories:
-                if hasattr(cat, 'as_dict'):
-                    cat_dict = cat.as_dict()
-                elif isinstance(cat, dict):
-                    cat_dict = cat
-                else:
-                    cat_dict = vars(cat) if hasattr(cat, '__dict__') else {}
-                
-                # Check both camelCase and snake_case field names
-                cat_name = cat_dict.get('configuredName') or cat_dict.get('configured_name', '')
-                cat_id = cat_dict.get('id', '')
-                is_custom = cat_dict.get('customCategory', False)
-                
-                # Track custom categories for debugging
-                if is_custom:
-                    custom_cats.append(f"{cat_name} (ID: {cat_id})")
-                
-                # Flexible matching: exact match or case-insensitive match
-                if cat_name == category_name or cat_name.lower() == category_name.lower():
-                    logger.info(f"✅ Found existing category: '{cat_name}' (ID: {cat_id})")
-                    return str(cat_id)
-            
-            # Log available custom categories to help user
-            if custom_cats:
-                logger.info(f"📋 Available custom categories: {', '.join(custom_cats)}")
+                urls = normalize_urls(urls)
+                self.logger.info(f"✓ Retrieved {len(urls)} URLs from denylist")
+                return urls
             else:
-                logger.info("📋 No custom categories found in your tenant")
-            
-            # Category not found - provide helpful error message
-            logger.error(f"❌ Category '{category_name}' not found!")
-            logger.error("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.error("  MANUAL STEP REQUIRED:")
-            logger.error("  The Zscaler Beta API has a bug that prevents category creation.")
-            logger.error("  Please create the category manually in Zscaler Admin Portal:")
-            logger.error("  ")
-            logger.error("  1. Login to https://admin.zscalerbeta.net")
-            logger.error("  2. Go to: Administration → URL Categories")
-            logger.error("  3. Click 'Add URL Category'")
-            logger.error(f"  4. Name: {category_name}")
-            logger.error("  5. Super Category: User-Defined")
-            logger.error("  6. Save and Activate")
-            logger.error("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error with custom category: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def _add_url_to_category(self, category_id: str, url: str) -> bool:
-        """
-        Add a URL to a custom URL category using direct HTTP.
-        
-        WORKAROUND: The SDK's add_urls_to_category() also triggers the HV000030 bug
-        on zscalerbeta. We use direct HTTP PUT with ?action=ADD_TO_LIST to bypass it.
-        """
-        import requests
-        
-        logger.info(f"➕ Adding URL '{url}' to category '{category_id}'...")
-        
-        try:
-            # Get session_id from SDK's legacy client
-            zia_legacy = None
-            
-            if hasattr(self.client, 'zia_legacy_client'):
-                zia_legacy = self.client.zia_legacy_client
-            
-            if not zia_legacy and hasattr(self.client, '_request_executor'):
-                if hasattr(self.client._request_executor, 'zia_legacy_client'):
-                    zia_legacy = self.client._request_executor.zia_legacy_client
-            
-            if not zia_legacy or not hasattr(zia_legacy, 'session_id'):
-                logger.error("❌ Could not access SDK session_id")
-                return False
-            
-            session_id = zia_legacy.session_id
-            base_url = f"https://zsapi.{self.cloud}.net/api/v1"
-            
-            # Build headers with session cookie
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Cookie": f"JSESSIONID={session_id}"
-            }
-            
-            # Minimal payload - ONLY the URL to add
-            # Do NOT include keywords, ipRanges, or any other fields
-            payload = {
-                "urls": [url]
-            }
-            
-            # Use PUT with action=ADD_TO_LIST query parameter
-            api_url = f"{base_url}/urlCategories/{category_id}?action=ADD_TO_LIST"
-            
-            logger.info(f"📤 PUT {api_url}")
-            logger.info(f"📦 Payload: {json.dumps(payload)}")
-            
-            response = requests.put(
-                api_url,
-                json=payload,
-                headers=headers,
-                timeout=30
-            )
-            
-            logger.info(f"📥 Response status: {response.status_code}")
-            
-            if response.status_code in [200, 204]:
-                logger.info(f"✅ URL '{url}' added to category successfully")
-                return True
-            else:
-                logger.error(f"❌ API error: {response.status_code} - {response.text}")
-                return False
-            
-        except Exception as e:
-            logger.error(f"❌ Error adding URL to category: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def _get_rule_by_name(self, rule_name: str) -> Optional[Dict]:
-        """Get a URL filtering rule by name"""
-        rules = self.list_url_filtering_rules()
-        
-        for rule in rules:
-            if rule.get('name') == rule_name:
-                return rule
-        
-        return None
-    
-    def _add_category_to_rule(self, rule_name: str, category_id: str) -> bool:
-        """Add a URL category to a URL filtering rule using SDK"""
-        logger.info(f"🔗 Adding category '{category_id}' to rule '{rule_name}'...")
-        
-        try:
-            url_filtering = self._get_url_filtering_api()
-            
-            if not url_filtering:
-                logger.error("❌ Could not find URL filtering API in SDK")
-                return False
-            
-            # Get the rule first
-            target_rule = self._get_rule_by_name(rule_name)
-            
-            if not target_rule:
-                logger.error(f"❌ Rule '{rule_name}' not found")
-                return False
-            
-            rule_id = target_rule.get('id')
-            logger.info(f"📌 Found rule '{rule_name}' with ID: {rule_id}")
-            
-            # Get current URL categories
-            current_categories = target_rule.get('urlCategories', []) or target_rule.get('url_categories', []) or []
-            logger.info(f"   Current categories: {current_categories}")
-            
-            # Check if category already in rule
-            if category_id in current_categories:
-                logger.info(f"✅ Category '{category_id}' already in rule")
-                return True
-            
-            # Add category to rule
-            new_categories = list(current_categories) + [category_id]
-            logger.info(f"📤 Updating rule with new categories: {new_categories}")
-            
-            # Build update payload - only include necessary fields
-            # Use clean_payload to remove any empty values
-            update_kwargs = clean_payload({
-                "url_categories": new_categories,
-                "urls": target_rule.get('urls'),
-                "name": target_rule.get('name'),
-                "order": target_rule.get('order'),
-                "state": target_rule.get('state'),
-                "action": target_rule.get('action'),
-                "protocols": target_rule.get('protocols'),
-                "block_override": target_rule.get('blockOverride') or target_rule.get('block_override'),
-            })
-            
-            # Call update method
-            result = url_filtering.update_rule(
-                rule_id=str(rule_id),
-                **update_kwargs
-            )
-            
-            data, error = self._handle_sdk_response(result)
-            
-            if error:
-                logger.error(f"❌ SDK error updating rule: {error}")
-                return False
-            
-            logger.info(f"✅ Category added to rule successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Error adding category to rule: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def _activate_changes(self) -> bool:
-        """Activate configuration changes using SDK"""
-        logger.info("🔄 Activating configuration changes...")
-        
-        try:
-            # Try to find activate method
-            if hasattr(self.client.zia, 'activate'):
-                activate_api = self.client.zia.activate
+                self.logger.error(f"✗ Failed to fetch denylist: {resp.status_code}")
+                return []
                 
-                # Try different method names
-                for method_name in ['activate', 'activate_changes', 'activate_status']:
-                    if hasattr(activate_api, method_name):
-                        method = getattr(activate_api, method_name)
-                        result = method()
-                        data, error = self._handle_sdk_response(result)
-                        
-                        if error:
-                            logger.warning(f"Activation warning: {error}")
-                        else:
-                            logger.info("✅ Configuration changes activated")
-                        return True
-            
-            logger.info("ℹ️ No activation method found - changes may auto-activate on session end")
-            return True
-            
         except Exception as e:
-            logger.warning(f"⚠️ Activation warning: {e}")
-            return True  # Continue anyway
+            self.logger.error(f"✗ Exception fetching denylist: {e}")
+            return []
     
-    def block_url_in_rule(self, rule_name: str, url: str) -> bool:
+    def update_denylist_bulk(
+        self, 
+        new_urls: List[str],
+        dry_run: bool = False
+    ) -> Dict:
         """
-        Block a URL by:
-        1. Creating/getting a custom URL category
-        2. Adding the URL to that category
-        3. Adding the category to the blocking rule
-        4. Activating changes
+        Bulk add URLs to denylist (ignores duplicates).
+        
+        Args:
+            new_urls: List of URLs to add
+            dry_run: If True, only simulate the operation
+        
+        Returns:
+            Dict with operation results
         """
-        logger.info(f"🚫 Blocking URL '{url}' via custom URL category...")
+        self.logger.info(f"Starting denylist bulk update (dry_run={dry_run})")
         
-        # Step 1: Get or create the custom category
-        category_id = self._get_or_create_block_category("Blocked_URLs_Automation")
-        if not category_id:
-            logger.error("❌ Failed to get or create block category")
-            return False
+        new_urls = normalize_urls(new_urls)
+        self.logger.info(f"Processing {len(new_urls)} URLs")
         
-        # Step 2: Add URL to the category
-        if not self._add_url_to_category(category_id, url):
-            logger.error("❌ Failed to add URL to category")
-            return False
+        # Fetch existing denylist
+        existing = self.get_denylist()
+        existing_set = {url.lower() for url in existing}
         
-        # Step 3: Add category to the rule
-        if not self._add_category_to_rule(rule_name, category_id):
-            logger.error("❌ Failed to add category to rule")
-            return False
+        # Compute URLs to add
+        to_add = [url for url in new_urls if url.lower() not in existing_set]
         
-        # Step 4: Activate changes
-        self._activate_changes()
+        if not to_add:
+            self.logger.info("✓ All URLs already exist in denylist")
+            return {
+                "status": "no_change",
+                "message": "All URLs already exist",
+                "existing_count": len(existing),
+                "added_count": 0,
+                "added": [],
+                "final_count": len(existing)
+            }
         
-        logger.info(f"✅ Successfully blocked URL '{url}' using category '{category_id}'")
-        return True
+        self.logger.info(f"Found {len(to_add)} new URLs to add")
+        
+        if dry_run:
+            self.logger.info("✓ Dry-run mode: No changes made")
+            return {
+                "status": "dry_run",
+                "message": "Dry-run completed successfully",
+                "existing_count": len(existing),
+                "would_add_count": len(to_add),
+                "would_add": to_add,
+                "final_count": len(existing) + len(to_add)
+            }
+        
+        # Merge and update
+        updated = existing + to_add
+        
+        self.logger.info(f"Updating denylist: {len(existing)} → {len(updated)} URLs")
+        
+        try:
+            resp = self._request("PUT", "/security/advanced/blacklistUrls", json_body=updated)
+            
+            if resp.status_code in (200, 204):
+                self.logger.info("✓ Denylist updated successfully")
+                return {
+                    "status": "updated",
+                    "message": "Denylist updated successfully",
+                    "existing_count": len(existing),
+                    "added_count": len(to_add),
+                    "added": to_add,
+                    "final_count": len(updated)
+                }
+            else:
+                self.logger.error(f"✗ Update failed: HTTP {resp.status_code}")
+                return {
+                    "status": "error",
+                    "message": f"API returned status {resp.status_code}",
+                    "http_status": resp.status_code,
+                    "error_body": resp.text[:500]
+                }
+                
+        except Exception as e:
+            self.logger.error(f"✗ Exception during update: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+    
+    # ========================================================================
+    # Allowlist Operations
+    # ========================================================================
+    
+    def get_allowlist(self) -> Tuple[List[str], Dict]:
+        """
+        Fetch current allowlist URLs and full security object.
+        
+        Returns:
+            Tuple of (allowlist_urls, full_security_object)
+        """
+        self.logger.info("Fetching current allowlist...")
+        
+        try:
+            resp = self._request("GET", "/security")
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                # Handle different field names
+                allow = (
+                    data.get("allowlistUrls", []) or 
+                    data.get("allowlist_urls", []) or 
+                    data.get("whitelistUrls", []) or
+                    []
+                )
+                
+                allow = normalize_urls(allow)
+                self.logger.info(f"✓ Retrieved {len(allow)} URLs from allowlist")
+                return allow, data
+            else:
+                self.logger.error(f"✗ Failed to fetch allowlist: {resp.status_code}")
+                return [], {}
+                
+        except Exception as e:
+            self.logger.error(f"✗ Exception fetching allowlist: {e}")
+            return [], {}
+    
+    def update_allowlist_bulk(
+        self, 
+        new_urls: List[str],
+        dry_run: bool = False
+    ) -> Dict:
+        """
+        Bulk add URLs to allowlist (ignores duplicates).
+        
+        Note: Allowlist requires PUT of entire /security object.
+        
+        Args:
+            new_urls: List of URLs to add
+            dry_run: If True, only simulate the operation
+        
+        Returns:
+            Dict with operation results
+        """
+        self.logger.info(f"Starting allowlist bulk update (dry_run={dry_run})")
+        
+        new_urls = normalize_urls(new_urls)
+        self.logger.info(f"Processing {len(new_urls)} URLs")
+        
+        # Fetch existing allowlist and security object
+        existing, sec_obj = self.get_allowlist()
+        
+        if not sec_obj:
+            self.logger.error("✗ Failed to fetch security object")
+            return {
+                "status": "error",
+                "message": "Could not fetch security object"
+            }
+        
+        existing_set = {url.lower() for url in existing}
+        
+        # Compute URLs to add
+        to_add = [url for url in new_urls if url.lower() not in existing_set]
+        
+        if not to_add:
+            self.logger.info("✓ All URLs already exist in allowlist")
+            return {
+                "status": "no_change",
+                "message": "All URLs already exist",
+                "existing_count": len(existing),
+                "added_count": 0,
+                "added": [],
+                "final_count": len(existing)
+            }
+        
+        self.logger.info(f"Found {len(to_add)} new URLs to add")
+        
+        if dry_run:
+            self.logger.info("✓ Dry-run mode: No changes made")
+            return {
+                "status": "dry_run",
+                "message": "Dry-run completed successfully",
+                "existing_count": len(existing),
+                "would_add_count": len(to_add),
+                "would_add": to_add,
+                "final_count": len(existing) + len(to_add)
+            }
+        
+        # Merge and update security object
+        updated = existing + to_add
+        sec_obj["allowlistUrls"] = updated
+        
+        self.logger.info(f"Updating allowlist: {len(existing)} → {len(updated)} URLs")
+        
+        try:
+            resp = self._request("PUT", "/security", json_body=sec_obj)
+            
+            if resp.status_code in (200, 204):
+                self.logger.info("✓ Allowlist updated successfully")
+                return {
+                    "status": "updated",
+                    "message": "Allowlist updated successfully",
+                    "existing_count": len(existing),
+                    "added_count": len(to_add),
+                    "added": to_add,
+                    "final_count": len(updated)
+                }
+            else:
+                self.logger.error(f"✗ Update failed: HTTP {resp.status_code}")
+                return {
+                    "status": "error",
+                    "message": f"API returned status {resp.status_code}",
+                    "http_status": resp.status_code,
+                    "error_body": resp.text[:500]
+                }
+                
+        except Exception as e:
+            self.logger.error(f"✗ Exception during update: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
 
+
+# ============================================================================
+# CLI Interface
+# ============================================================================
 
 def main():
-    """Main entry point"""
     parser = argparse.ArgumentParser(
-        description='Zscaler URL Filtering Automation',
+        description="Zscaler ZIA URL Management Script",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  List all URL filtering rules:
-    python zscaler_url_automation.py --list-rules
 
-  Block a URL in a specific rule:
-    python zscaler_url_automation.py --rule-name "URL Filtering Rule-1" --block-url "malicious.com"
+  # List current denylist
+  python3 zscaler_url_automation.py --list deny
+
+  # List current allowlist
+  python3 zscaler_url_automation.py --list allow
+
+  # Bulk add URLs to denylist
+  python3 zscaler_url_automation.py --mode deny --bulk-file urls.txt
+
+  # Bulk add URLs to allowlist
+  python3 zscaler_url_automation.py --mode allow --bulk-file urls.txt
+
+  # Dry-run (simulate without changes)
+  python3 zscaler_url_automation.py --mode deny --bulk-file urls.txt --dry-run
 
 Environment Variables Required:
-  ZIA_USERNAME  - Your ZIA admin username
-  ZIA_PASSWORD  - Your ZIA admin password
-  ZIA_API_KEY   - Your ZIA API key
-  ZIA_CLOUD     - Your ZIA cloud (default: zscalerbeta)
+  ZIA_USERNAME    - Zscaler admin username
+  ZIA_PASSWORD    - Zscaler admin password
+  ZIA_API_KEY     - Zscaler API key
+  ZIA_CLOUD       - Zscaler cloud (default: zscaler)
         """
     )
     
-    parser.add_argument('--list-rules', action='store_true', 
-                       help='List all URL filtering rules')
-    parser.add_argument('--list-categories', action='store_true',
-                       help='List all URL categories')
-    parser.add_argument('--rule-name', type=str, 
-                       help='Name of the URL filtering rule to modify')
-    parser.add_argument('--block-url', type=str, 
-                       help='URL to block (will be added to a custom category)')
-    parser.add_argument('--output', type=str, choices=['json', 'text'], default='text',
-                       help='Output format (default: text)')
+    parser.add_argument(
+        "--mode",
+        choices=["deny", "allow"],
+        help="Operation mode: deny (denylist) or allow (allowlist)"
+    )
+    
+    parser.add_argument(
+        "--list",
+        choices=["deny", "allow"],
+        help="List current URLs in deny/allow list"
+    )
+    
+    parser.add_argument(
+        "--bulk-file",
+        type=str,
+        help="Path to file containing URLs (one per line)"
+    )
+    
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Simulate operation without making changes"
+    )
+    
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        help="Path to log file (default: stderr only)"
+    )
+    
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
     
     args = parser.parse_args()
     
-    # Initialize automation
-    automation = ZscalerURLAutomation()
+    # Setup logging
+    logger = setup_logging(log_file=args.log_file, verbose=args.verbose)
     
-    # Execute requested operation
-    if args.list_rules:
-        rules = automation.list_url_filtering_rules()
+    logger.info("=" * 70)
+    logger.info("Zscaler URL Automation Script Started")
+    logger.info(f"Timestamp: {datetime.now().isoformat()}")
+    logger.info("=" * 70)
+    
+    # Initialize manager
+    manager = ZscalerURLManager(logger)
+    
+    # Handle list operations
+    if args.list:
+        if args.list == "deny":
+            urls = manager.get_denylist()
+            result = {
+                "operation": "list_denylist",
+                "count": len(urls),
+                "urls": urls
+            }
+        else:  # allow
+            urls, _ = manager.get_allowlist()
+            result = {
+                "operation": "list_allowlist",
+                "count": len(urls),
+                "urls": urls
+            }
         
-        if args.output == 'json':
-            print(json.dumps(rules, indent=2, default=str))
-        else:
-            print("\n" + "="*80)
-            print("URL FILTERING RULES")
-            print("="*80)
-            
-            if not rules:
-                print("No rules found")
-            else:
-                for i, rule in enumerate(rules, 1):
-                    print(f"\n--- Rule {i} ---")
-                    print(f"  ID:     {rule.get('id', 'N/A')}")
-                    print(f"  Name:   {rule.get('name', 'N/A')}")
-                    print(f"  Action: {rule.get('action', 'N/A')}")
-                    print(f"  State:  {rule.get('state', 'N/A')}")
-                    print(f"  Order:  {rule.get('order', 'N/A')}")
-                    categories = rule.get('urlCategories', []) or rule.get('url_categories', [])
-                    print(f"  URL Categories: {categories if categories else 'None'}")
-            
-            print("\n" + "="*80)
+        # Output JSON to stdout for Ansible
+        print(json.dumps(result, indent=2))
+        return
     
-    elif args.list_categories:
-        categories = automation.list_url_categories(custom_only=True)
+    # Handle bulk operations
+    if args.mode and args.bulk_file:
+        urls = read_urls_from_file(args.bulk_file)
         
-        if args.output == 'json':
-            print(json.dumps(categories, indent=2, default=str))
-        else:
-            print("\n" + "="*80)
-            print("CUSTOM URL CATEGORIES")
-            print("="*80)
-            
-            if not categories:
-                print("No custom categories found")
-            else:
-                for i, cat in enumerate(categories, 1):
-                    print(f"\n--- Category {i} ---")
-                    print(f"  ID:   {cat.get('id', 'N/A')}")
-                    print(f"  Name: {cat.get('configuredName') or cat.get('configured_name', 'N/A')}")
-                    urls = cat.get('urls', [])
-                    print(f"  URLs: {urls if urls else 'None'}")
-            
-            print("\n" + "="*80)
-    
-    elif args.block_url and args.rule_name:
-        success = automation.block_url_in_rule(args.rule_name, args.block_url)
-        if success:
-            print(f"\n✅ Successfully blocked URL '{args.block_url}' in rule '{args.rule_name}'")
-            sys.exit(0)
-        else:
-            print(f"\n❌ Failed to block URL '{args.block_url}'")
+        if args.mode == "deny":
+            result = manager.update_denylist_bulk(urls, dry_run=args.dry_run)
+        else:  # allow
+            result = manager.update_allowlist_bulk(urls, dry_run=args.dry_run)
+        
+        result["operation"] = f"bulk_update_{args.mode}list"
+        result["timestamp"] = datetime.now().isoformat()
+        
+        # Output JSON to stdout for Ansible
+        print(json.dumps(result, indent=2))
+        
+        # Exit with appropriate code
+        if result["status"] == "error":
             sys.exit(1)
+        
+        return
     
-    else:
-        parser.print_help()
-        print("\n⚠️  Please specify an operation (--list-rules, --list-categories, or --block-url with --rule-name)")
+    # No valid operation specified
+    parser.print_help()
+    sys.exit(1)
 
 
 if __name__ == "__main__":
