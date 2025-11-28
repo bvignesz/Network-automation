@@ -1,74 +1,101 @@
 ---
 - name: Zscaler Denylist Bulk Management
-  hosts: "{{ target_hosts | default('localhost') }}"
+  hosts: all
   gather_facts: false
   
   vars:
     # Operation parameters
     mode: "deny"
     bulk_file_local: "{{ bulk_file | default('files/deny_urls.txt') }}"
-    bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ ansible_date_time.epoch }}.txt"
-    script_path: "/tmp/zscaler_url_automation.py"
+    bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ 999999 | random }}.txt"
+    script_path: "/tmp/zscaler_url_automation_{{ 999999 | random }}.py"
     
     # Logging
-    log_file_remote: "/tmp/zscaler_automation_{{ ansible_date_time.epoch }}.log"
-    log_dir_local: "{{ playbook_dir }}/../logs"
+    log_file_remote: "/tmp/zscaler_automation_{{ 999999 | random }}.log"
     
-    # Execution options
-    dry_run: "{{ dry_run_mode | default(false) }}"
-    verbose: "{{ verbose_mode | default(false) }}"
+    # Execution options (passed from Semaphore extra vars)
+    dry_run: "{{ dry_run_mode | default(false) | bool }}"
+    verbose: "{{ verbose_mode | default(false) | bool }}"
+    
+    # Semaphore will inject these via Environment in UI:
+    # - ZIA_USERNAME
+    # - ZIA_PASSWORD
+    # - ZIA_API_KEY
+    # - ZIA_CLOUD
   
-  environment:
-    ZIA_USERNAME: "{{ vault_zia_username }}"
-    ZIA_PASSWORD: "{{ vault_zia_password }}"
-    ZIA_API_KEY: "{{ vault_zia_api_key }}"
-    ZIA_CLOUD: "{{ zia_cloud | default('zscaler') }}"
+  # No environment block here - Semaphore handles this via Environment settings
   
   tasks:
     # ========================================================================
     # Pre-flight Checks
     # ========================================================================
     
+    - name: Verify required environment variables are set
+      assert:
+        that:
+          - lookup('env', 'ZIA_USERNAME') | length > 0
+          - lookup('env', 'ZIA_PASSWORD') | length > 0
+          - lookup('env', 'ZIA_API_KEY') | length > 0
+        fail_msg: "Missing required Zscaler credentials. Check Semaphore Environment settings."
+        success_msg: "Zscaler credentials validated"
+      delegate_to: localhost
+      run_once: true
+      tags: always
+
     - name: Display execution parameters
       debug:
         msg:
-          - "Target: {{ inventory_hostname }}"
+          - "=========================================="
+          - "Zscaler Bulk Denylist Update"
+          - "=========================================="
+          - "Target Host: {{ inventory_hostname }}"
           - "Mode: {{ mode }}"
-          - "Bulk file: {{ bulk_file_local }}"
-          - "Dry-run: {{ dry_run }}"
-          - "ZIA Cloud: {{ zia_cloud | default('zscaler') }}"
+          - "Bulk File: {{ bulk_file_local }}"
+          - "Dry-Run: {{ dry_run }}"
+          - "ZIA Cloud: {{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+          - "=========================================="
       tags: always
 
-    - name: Validate bulk file exists locally
+    - name: Validate bulk file exists in repository
       stat:
-        path: "{{ bulk_file_local }}"
+        path: "{{ playbook_dir }}/../{{ bulk_file_local }}"
       register: local_file_check
       delegate_to: localhost
+      run_once: true
       failed_when: not local_file_check.stat.exists
       tags: always
 
-    - name: Display bulk file stats
+    - name: Display bulk file information
       debug:
-        msg: "Bulk file size: {{ local_file_check.stat.size }} bytes"
+        msg: 
+          - "File: {{ bulk_file_local }}"
+          - "Size: {{ local_file_check.stat.size }} bytes"
+          - "Modified: {{ local_file_check.stat.mtime | int | to_datetime }}"
       tags: always
 
     # ========================================================================
     # File Transfer
     # ========================================================================
 
-    - name: Copy bulk URL file to remote host
+    - name: Copy bulk URL file to execution host
       copy:
-        src: "{{ bulk_file_local }}"
+        src: "{{ playbook_dir }}/../{{ bulk_file_local }}"
         dest: "{{ bulk_file_remote }}"
         mode: '0644'
       register: file_copy
       tags: transfer
 
-    - name: Copy Python script to remote host
+    - name: Copy Python automation script to execution host
       copy:
         src: "{{ playbook_dir }}/../scripts/zscaler_url_automation.py"
         dest: "{{ script_path }}"
         mode: '0755'
+      tags: transfer
+
+    - name: Verify files copied successfully
+      debug:
+        msg: "Files transferred successfully to {{ inventory_hostname }}"
       tags: transfer
 
     # ========================================================================
@@ -86,27 +113,61 @@
         msg: "{{ python_version.stdout }}"
       tags: dependencies
 
+    - name: Ensure pip is available
+      command: python3 -m pip --version
+      register: pip_check
+      changed_when: false
+      failed_when: false
+      tags: dependencies
+
     - name: Install Python dependencies
       pip:
         name:
-          - zscaler-sdk-python
-          - requests
+          - zscaler-sdk-python>=2.0.0
+          - requests>=2.31.0
         state: present
         executable: pip3
+        extra_args: --user
+      tags: dependencies
+
+    - name: Verify Zscaler SDK installation
+      command: python3 -c "import zscaler; print('SDK version:', zscaler.__version__ if hasattr(zscaler, '__version__') else 'installed')"
+      register: sdk_check
+      changed_when: false
+      tags: dependencies
+
+    - name: Display SDK status
+      debug:
+        var: sdk_check.stdout_lines
       tags: dependencies
 
     # ========================================================================
     # Execute Script
     # ========================================================================
 
+    - name: Build script command
+      set_fact:
+        script_command: >-
+          python3 {{ script_path }}
+          --mode {{ mode }}
+          --bulk-file {{ bulk_file_remote }}
+          {% if dry_run %}--dry-run{% endif %}
+          {% if verbose %}--verbose{% endif %}
+          --log-file {{ log_file_remote }}
+      tags: execute
+
+    - name: Display command to be executed
+      debug:
+        msg: "{{ script_command }}"
+      tags: execute
+
     - name: Execute Zscaler bulk update script
-      command: >
-        python3 {{ script_path }}
-        --mode {{ mode }}
-        --bulk-file {{ bulk_file_remote }}
-        {% if dry_run %}--dry-run{% endif %}
-        {% if verbose %}--verbose{% endif %}
-        --log-file {{ log_file_remote }}
+      shell: |
+        export ZIA_USERNAME="{{ lookup('env', 'ZIA_USERNAME') }}"
+        export ZIA_PASSWORD="{{ lookup('env', 'ZIA_PASSWORD') }}"
+        export ZIA_API_KEY="{{ lookup('env', 'ZIA_API_KEY') }}"
+        export ZIA_CLOUD="{{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
+        {{ script_command }}
       register: script_execution
       changed_when: false
       failed_when: script_execution.rc != 0
@@ -116,7 +177,7 @@
     # Parse Results
     # ========================================================================
 
-    - name: Parse script output
+    - name: Parse script JSON output
       set_fact:
         update_result: "{{ script_execution.stdout | from_json }}"
       when: script_execution.rc == 0
@@ -126,9 +187,12 @@
       debug:
         msg:
           - "=========================================="
+          - "OPERATION SUMMARY"
+          - "=========================================="
           - "Operation: {{ update_result.operation | default('unknown') }}"
-          - "Status: {{ update_result.status | default('unknown') }}"
+          - "Status: {{ update_result.status | default('unknown') | upper }}"
           - "Message: {{ update_result.message | default('N/A') }}"
+          - "----------------------------------------"
           - "Existing URLs: {{ update_result.existing_count | default(0) }}"
           - "URLs Added: {{ update_result.added_count | default(0) }}"
           - "Final Count: {{ update_result.final_count | default(0) }}"
@@ -136,9 +200,9 @@
       when: update_result is defined
       tags: results
 
-    - name: Display added URLs
+    - name: Display added URLs (success)
       debug:
-        var: update_result.added
+        msg: "Added URLs: {{ update_result.added }}"
       when: 
         - update_result is defined
         - update_result.added_count | default(0) > 0
@@ -147,37 +211,67 @@
 
     - name: Display would-be-added URLs (dry-run)
       debug:
-        var: update_result.would_add
+        msg: "Would add URLs: {{ update_result.would_add }}"
       when:
         - update_result is defined
         - dry_run
         - update_result.would_add_count | default(0) > 0
       tags: results
 
+    - name: Display "no changes" message
+      debug:
+        msg: "✓ No changes needed - all URLs already exist in denylist"
+      when:
+        - update_result is defined
+        - update_result.status == "no_change"
+      tags: results
+
     # ========================================================================
     # Error Handling
     # ========================================================================
 
-    - name: Check for errors
-      fail:
-        msg: |
-          Script execution failed!
-          Status: {{ update_result.status }}
-          Message: {{ update_result.message | default('Unknown error') }}
-      when:
-        - update_result is defined
-        - update_result.status == "error"
+    - name: Handle script errors
+      block:
+        - name: Display error details
+          debug:
+            msg:
+              - "=========================================="
+              - "ERROR DETECTED"
+              - "=========================================="
+              - "Status: {{ update_result.status }}"
+              - "Message: {{ update_result.message | default('Unknown error') }}"
+              - "HTTP Status: {{ update_result.http_status | default('N/A') }}"
+              - "=========================================="
+          when: update_result is defined
+
+        - name: Fail playbook on error
+          fail:
+            msg: "Script execution failed. Check logs for details."
+          when:
+            - update_result is defined
+            - update_result.status == "error"
       tags: results
 
     # ========================================================================
     # Logging and Cleanup
     # ========================================================================
 
-    - name: Fetch remote log file
-      fetch:
+    - name: Display log file location
+      debug:
+        msg: "Remote log file: {{ log_file_remote }}"
+      tags: cleanup
+
+    - name: Fetch execution log from remote host
+      slurp:
         src: "{{ log_file_remote }}"
-        dest: "{{ log_dir_local }}/{{ inventory_hostname }}_{{ ansible_date_time.iso8601_basic_short }}.log"
-        flat: yes
+      register: remote_log
+      ignore_errors: true
+      tags: cleanup
+
+    - name: Display last 50 lines of log
+      debug:
+        msg: "{{ (remote_log.content | b64decode).split('\n')[-50:] }}"
+      when: remote_log is succeeded
       tags: cleanup
 
     - name: Cleanup temporary files
@@ -191,7 +285,7 @@
       tags: cleanup
 
     # ========================================================================
-    # Post-execution Summary
+    # Final Summary
     # ========================================================================
 
     - name: Generate execution summary
@@ -204,16 +298,21 @@
           dry_run: "{{ dry_run }}"
           urls_processed: "{{ update_result.added_count | default(0) }}"
           final_count: "{{ update_result.final_count | default(0) }}"
+          zia_cloud: "{{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
+      when: update_result is defined
       tags: summary
 
-    - name: Display execution summary
+    - name: Display final execution summary
       debug:
-        var: execution_summary
+        msg:
+          - "=========================================="
+          - "EXECUTION COMPLETE"
+          - "=========================================="
+          - "{{ execution_summary | to_nice_yaml }}"
+      when: execution_summary is defined
       tags: summary
 
-    - name: Write summary to local file
-      copy:
-        content: "{{ execution_summary | to_nice_json }}"
-        dest: "{{ log_dir_local }}/summary_{{ ansible_date_time.epoch }}.json"
-      delegate_to: localhost
-      tags: summary
+    - name: Mark as successful
+      debug:
+        msg: "✓ Playbook completed successfully"
+      tags: always
