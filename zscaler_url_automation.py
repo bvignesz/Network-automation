@@ -350,30 +350,68 @@ class ZscalerURLAutomation:
             return None
     
     def _add_url_to_category(self, category_id: str, url: str) -> bool:
-        """Add a URL to a custom URL category using SDK"""
+        """
+        Add a URL to a custom URL category using direct HTTP.
+        
+        WORKAROUND: The SDK's add_urls_to_category() also triggers the HV000030 bug
+        on zscalerbeta. We use direct HTTP PUT with ?action=ADD_TO_LIST to bypass it.
+        """
+        import requests
+        
         logger.info(f"➕ Adding URL '{url}' to category '{category_id}'...")
         
         try:
-            url_categories = self._get_url_categories_api()
+            # Get session_id from SDK's legacy client
+            zia_legacy = None
             
-            if not url_categories:
-                logger.error("❌ Could not find URL categories API in SDK")
+            if hasattr(self.client, 'zia_legacy_client'):
+                zia_legacy = self.client.zia_legacy_client
+            
+            if not zia_legacy and hasattr(self.client, '_request_executor'):
+                if hasattr(self.client._request_executor, 'zia_legacy_client'):
+                    zia_legacy = self.client._request_executor.zia_legacy_client
+            
+            if not zia_legacy or not hasattr(zia_legacy, 'session_id'):
+                logger.error("❌ Could not access SDK session_id")
                 return False
             
-            # Use add_urls_to_category method
-            result = url_categories.add_urls_to_category(
-                category_id=category_id,
-                urls=[url]
+            session_id = zia_legacy.session_id
+            base_url = f"https://zsapi.{self.cloud}.net/api/v1"
+            
+            # Build headers with session cookie
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Cookie": f"JSESSIONID={session_id}"
+            }
+            
+            # Minimal payload - ONLY the URL to add
+            # Do NOT include keywords, ipRanges, or any other fields
+            payload = {
+                "urls": [url]
+            }
+            
+            # Use PUT with action=ADD_TO_LIST query parameter
+            api_url = f"{base_url}/urlCategories/{category_id}?action=ADD_TO_LIST"
+            
+            logger.info(f"📤 PUT {api_url}")
+            logger.info(f"📦 Payload: {json.dumps(payload)}")
+            
+            response = requests.put(
+                api_url,
+                json=payload,
+                headers=headers,
+                timeout=30
             )
             
-            data, error = self._handle_sdk_response(result)
+            logger.info(f"📥 Response status: {response.status_code}")
             
-            if error:
-                logger.error(f"❌ SDK error adding URL: {error}")
+            if response.status_code in [200, 204]:
+                logger.info(f"✅ URL '{url}' added to category successfully")
+                return True
+            else:
+                logger.error(f"❌ API error: {response.status_code} - {response.text}")
                 return False
-            
-            logger.info(f"✅ URL '{url}' added to category successfully")
-            return True
             
         except Exception as e:
             logger.error(f"❌ Error adding URL to category: {e}")
