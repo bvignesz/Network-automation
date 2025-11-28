@@ -1,0 +1,219 @@
+---
+- name: Zscaler Denylist Bulk Management
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  
+  vars:
+    # Operation parameters
+    mode: "deny"
+    bulk_file_local: "{{ bulk_file | default('files/deny_urls.txt') }}"
+    bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ ansible_date_time.epoch }}.txt"
+    script_path: "/tmp/zscaler_url_automation.py"
+    
+    # Logging
+    log_file_remote: "/tmp/zscaler_automation_{{ ansible_date_time.epoch }}.log"
+    log_dir_local: "{{ playbook_dir }}/../logs"
+    
+    # Execution options
+    dry_run: "{{ dry_run_mode | default(false) }}"
+    verbose: "{{ verbose_mode | default(false) }}"
+  
+  environment:
+    ZIA_USERNAME: "{{ vault_zia_username }}"
+    ZIA_PASSWORD: "{{ vault_zia_password }}"
+    ZIA_API_KEY: "{{ vault_zia_api_key }}"
+    ZIA_CLOUD: "{{ zia_cloud | default('zscaler') }}"
+  
+  tasks:
+    # ========================================================================
+    # Pre-flight Checks
+    # ========================================================================
+    
+    - name: Display execution parameters
+      debug:
+        msg:
+          - "Target: {{ inventory_hostname }}"
+          - "Mode: {{ mode }}"
+          - "Bulk file: {{ bulk_file_local }}"
+          - "Dry-run: {{ dry_run }}"
+          - "ZIA Cloud: {{ zia_cloud | default('zscaler') }}"
+      tags: always
+
+    - name: Validate bulk file exists locally
+      stat:
+        path: "{{ bulk_file_local }}"
+      register: local_file_check
+      delegate_to: localhost
+      failed_when: not local_file_check.stat.exists
+      tags: always
+
+    - name: Display bulk file stats
+      debug:
+        msg: "Bulk file size: {{ local_file_check.stat.size }} bytes"
+      tags: always
+
+    # ========================================================================
+    # File Transfer
+    # ========================================================================
+
+    - name: Copy bulk URL file to remote host
+      copy:
+        src: "{{ bulk_file_local }}"
+        dest: "{{ bulk_file_remote }}"
+        mode: '0644'
+      register: file_copy
+      tags: transfer
+
+    - name: Copy Python script to remote host
+      copy:
+        src: "{{ playbook_dir }}/../scripts/zscaler_url_automation.py"
+        dest: "{{ script_path }}"
+        mode: '0755'
+      tags: transfer
+
+    # ========================================================================
+    # Dependencies
+    # ========================================================================
+
+    - name: Check Python version
+      command: python3 --version
+      register: python_version
+      changed_when: false
+      tags: dependencies
+
+    - name: Display Python version
+      debug:
+        msg: "{{ python_version.stdout }}"
+      tags: dependencies
+
+    - name: Install Python dependencies
+      pip:
+        name:
+          - zscaler-sdk-python
+          - requests
+        state: present
+        executable: pip3
+      tags: dependencies
+
+    # ========================================================================
+    # Execute Script
+    # ========================================================================
+
+    - name: Execute Zscaler bulk update script
+      command: >
+        python3 {{ script_path }}
+        --mode {{ mode }}
+        --bulk-file {{ bulk_file_remote }}
+        {% if dry_run %}--dry-run{% endif %}
+        {% if verbose %}--verbose{% endif %}
+        --log-file {{ log_file_remote }}
+      register: script_execution
+      changed_when: false
+      failed_when: script_execution.rc != 0
+      tags: execute
+
+    # ========================================================================
+    # Parse Results
+    # ========================================================================
+
+    - name: Parse script output
+      set_fact:
+        update_result: "{{ script_execution.stdout | from_json }}"
+      when: script_execution.rc == 0
+      tags: results
+
+    - name: Display operation summary
+      debug:
+        msg:
+          - "=========================================="
+          - "Operation: {{ update_result.operation | default('unknown') }}"
+          - "Status: {{ update_result.status | default('unknown') }}"
+          - "Message: {{ update_result.message | default('N/A') }}"
+          - "Existing URLs: {{ update_result.existing_count | default(0) }}"
+          - "URLs Added: {{ update_result.added_count | default(0) }}"
+          - "Final Count: {{ update_result.final_count | default(0) }}"
+          - "=========================================="
+      when: update_result is defined
+      tags: results
+
+    - name: Display added URLs
+      debug:
+        var: update_result.added
+      when: 
+        - update_result is defined
+        - update_result.added_count | default(0) > 0
+        - not dry_run
+      tags: results
+
+    - name: Display would-be-added URLs (dry-run)
+      debug:
+        var: update_result.would_add
+      when:
+        - update_result is defined
+        - dry_run
+        - update_result.would_add_count | default(0) > 0
+      tags: results
+
+    # ========================================================================
+    # Error Handling
+    # ========================================================================
+
+    - name: Check for errors
+      fail:
+        msg: |
+          Script execution failed!
+          Status: {{ update_result.status }}
+          Message: {{ update_result.message | default('Unknown error') }}
+      when:
+        - update_result is defined
+        - update_result.status == "error"
+      tags: results
+
+    # ========================================================================
+    # Logging and Cleanup
+    # ========================================================================
+
+    - name: Fetch remote log file
+      fetch:
+        src: "{{ log_file_remote }}"
+        dest: "{{ log_dir_local }}/{{ inventory_hostname }}_{{ ansible_date_time.iso8601_basic_short }}.log"
+        flat: yes
+      tags: cleanup
+
+    - name: Cleanup temporary files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ bulk_file_remote }}"
+        - "{{ script_path }}"
+        - "{{ log_file_remote }}"
+      tags: cleanup
+
+    # ========================================================================
+    # Post-execution Summary
+    # ========================================================================
+
+    - name: Generate execution summary
+      set_fact:
+        execution_summary:
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          hostname: "{{ inventory_hostname }}"
+          operation: "{{ mode }}list bulk update"
+          status: "{{ update_result.status | default('unknown') }}"
+          dry_run: "{{ dry_run }}"
+          urls_processed: "{{ update_result.added_count | default(0) }}"
+          final_count: "{{ update_result.final_count | default(0) }}"
+      tags: summary
+
+    - name: Display execution summary
+      debug:
+        var: execution_summary
+      tags: summary
+
+    - name: Write summary to local file
+      copy:
+        content: "{{ execution_summary | to_nice_json }}"
+        dest: "{{ log_dir_local }}/summary_{{ ansible_date_time.epoch }}.json"
+      delegate_to: localhost
+      tags: summary
