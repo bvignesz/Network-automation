@@ -1,0 +1,79 @@
+---
+- name: List Zscaler URL Lists
+  hosts: all
+  gather_facts: false
+  
+  vars:
+    list_type: "{{ list | default('deny') }}"
+    script_path: "/tmp/zscaler_url_automation_{{ 999999 | random }}.py"
+  
+  tasks:
+    - name: Verify required environment variables
+      assert:
+        that:
+          - lookup('env', 'ZIA_USERNAME') | length > 0
+          - lookup('env', 'ZIA_PASSWORD') | length > 0
+          - lookup('env', 'ZIA_API_KEY') | length > 0
+        fail_msg: "Missing Zscaler credentials in Semaphore Environment"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Display operation details
+      debug:
+        msg:
+          - "Listing {{ list_type }}list URLs"
+          - "ZIA Cloud: {{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
+
+    - name: Copy Python script
+      copy:
+        src: "{{ playbook_dir }}/../scripts/zscaler_url_automation.py"
+        dest: "{{ script_path }}"
+        mode: '0755'
+
+    - name: Install Python dependencies
+      pip:
+        name:
+          - zscaler-sdk-python
+          - requests
+        state: present
+        executable: pip3
+        extra_args: --user
+
+    - name: List current URLs
+      shell: |
+        export ZIA_USERNAME="{{ lookup('env', 'ZIA_USERNAME') }}"
+        export ZIA_PASSWORD="{{ lookup('env', 'ZIA_PASSWORD') }}"
+        export ZIA_API_KEY="{{ lookup('env', 'ZIA_API_KEY') }}"
+        export ZIA_CLOUD="{{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
+        python3 {{ script_path }} --list {{ list_type }}
+      register: list_output
+      changed_when: false
+
+    - name: Parse URL list
+      set_fact:
+        url_list: "{{ list_output.stdout | from_json }}"
+
+    - name: Display summary
+      debug:
+        msg:
+          - "=========================================="
+          - "{{ list_type | upper }}LIST SUMMARY"
+          - "=========================================="
+          - "Total URLs: {{ url_list.count }}"
+          - "Operation: {{ url_list.operation }}"
+          - "=========================================="
+
+    - name: Display first 20 URLs
+      debug:
+        msg: "{{ url_list.urls[:20] }}"
+      when: url_list.count > 0
+
+    - name: Display message if list is empty
+      debug:
+        msg: "The {{ list_type }}list is currently empty"
+      when: url_list.count == 0
+
+    - name: Cleanup
+      file:
+        path: "{{ script_path }}"
+        state: absent
