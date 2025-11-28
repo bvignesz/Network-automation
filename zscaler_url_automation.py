@@ -273,9 +273,11 @@ class ZscalerURLAutomation:
         
         WORKAROUND for SDK Bug (HV000030 keywords validation error):
         The SDK v1.9.5 has a known issue where add_url_category() causes server-side
-        validation error. We use the SDK's authenticated session to make a direct
+        validation error. We use the SDK's authenticated session_id to make a direct
         HTTP POST with a minimal payload that works.
         """
+        import requests
+        
         logger.info(f"📂 Looking for custom category '{category_name}'...")
         
         try:
@@ -317,26 +319,39 @@ class ZscalerURLAutomation:
             logger.info(f"📝 Creating new custom category '{category_name}'...")
             
             # ============================================================
-            # WORKAROUND: Use SDK's session for direct HTTP POST
+            # WORKAROUND: Use SDK's session_id for direct HTTP POST
             # This bypasses the SDK's add_url_category() which has issues
             # ============================================================
             
-            # Get the SDK's internal session and base URL
+            # Get the SDK's internal legacy client
             try:
-                # Access the legacy ZIA client's session
-                zia_client = self.client._zia_legacy_client if hasattr(self.client, '_zia_legacy_client') else None
-                if not zia_client:
-                    # Try alternate path
-                    zia_client = self.client.zia._request_executor.zia_legacy_client if hasattr(self.client.zia, '_request_executor') else None
+                # Try multiple paths to find the legacy ZIA client
+                zia_legacy = None
                 
-                if not zia_client:
-                    logger.warning("⚠️ Could not access SDK session, trying SDK method anyway...")
-                    # Fall back to SDK method
+                # Path 1: Direct attribute
+                if hasattr(self.client, 'zia_legacy_client'):
+                    zia_legacy = self.client.zia_legacy_client
+                
+                # Path 2: Through request executor
+                if not zia_legacy and hasattr(self.client, '_request_executor'):
+                    if hasattr(self.client._request_executor, 'zia_legacy_client'):
+                        zia_legacy = self.client._request_executor.zia_legacy_client
+                
+                # Path 3: Through zia interface
+                if not zia_legacy and hasattr(self.client, 'zia'):
+                    if hasattr(self.client.zia, '_request_executor'):
+                        if hasattr(self.client.zia._request_executor, 'zia_legacy_client'):
+                            zia_legacy = self.client.zia._request_executor.zia_legacy_client
+                
+                if not zia_legacy or not hasattr(zia_legacy, 'session_id'):
+                    logger.warning("⚠️ Could not access SDK session_id, trying SDK method anyway...")
                     return self._create_category_via_sdk(url_categories, category_name)
                 
-                # Get session and base URL from legacy client
-                session = zia_client.session
+                # Get session_id and base URL from legacy client
+                session_id = zia_legacy.session_id
                 base_url = f"https://zsapi.{self.cloud}.net/api/v1"
+                
+                logger.info(f"🔑 Got session_id from SDK (length: {len(session_id) if session_id else 0})")
                 
                 # Create minimal payload (exactly what Zscaler API expects)
                 # CRITICAL: Do NOT include keywords, ipRanges, etc. - not even as null
@@ -349,13 +364,21 @@ class ZscalerURLAutomation:
                     "description": "Custom category for automated URL blocking"
                 }
                 
+                # Build headers with session cookie
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Cookie": f"JSESSIONID={session_id}"
+                }
+                
                 logger.info(f"📤 Sending direct POST to {base_url}/urlCategories")
                 logger.info(f"📦 Payload: {json.dumps(payload)}")
                 
-                response = session.post(
+                response = requests.post(
                     f"{base_url}/urlCategories",
                     json=payload,
-                    headers={"Content-Type": "application/json"}
+                    headers=headers,
+                    timeout=30
                 )
                 
                 logger.info(f"📥 Response status: {response.status_code}")
