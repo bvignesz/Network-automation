@@ -1,0 +1,13 @@
+---
+- name: Zscaler Allowlist Bulk Management
+  hosts: all
+  gather_facts: false
+  
+  vars:
+    mode: "allow"
+    bulk_file_local: "{{ bulk_file | default('files/allow_urls.txt') }}"
+  
+  tasks:
+    # All tasks are identical to deny playbook, just changing mode variable
+    - name: Include common tasks
+      include_tasks: zscaler_bulk_deny.yml
