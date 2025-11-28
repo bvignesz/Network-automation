@@ -1,0 +1,61 @@
+---
+- name: List Zscaler URL Lists
+  hosts: "{{ target_hosts | default('localhost') }}"
+  gather_facts: false
+  
+  vars:
+    list_type: "{{ list | default('deny') }}"  # deny or allow
+    script_path: "/tmp/zscaler_url_automation.py"
+    output_file: "{{ playbook_dir }}/../logs/{{ list_type }}list_{{ ansible_date_time.epoch }}.json"
+  
+  environment:
+    ZIA_USERNAME: "{{ vault_zia_username }}"
+    ZIA_PASSWORD: "{{ vault_zia_password }}"
+    ZIA_API_KEY: "{{ vault_zia_api_key }}"
+    ZIA_CLOUD: "{{ zia_cloud | default('zscaler') }}"
+  
+  tasks:
+    - name: Copy Python script to remote host
+      copy:
+        src: "{{ playbook_dir }}/../scripts/zscaler_url_automation.py"
+        dest: "{{ script_path }}"
+        mode: '0755'
+
+    - name: Install Python dependencies
+      pip:
+        name:
+          - zscaler-sdk-python
+          - requests
+        state: present
+        executable: pip3
+
+    - name: List current URLs
+      command: >
+        python3 {{ script_path }}
+        --list {{ list_type }}
+      register: list_output
+      changed_when: false
+
+    - name: Parse output
+      set_fact:
+        url_list: "{{ list_output.stdout | from_json }}"
+
+    - name: Display URL count
+      debug:
+        msg: "{{ list_type | capitalize }}list contains {{ url_list.count }} URLs"
+
+    - name: Save URL list to file
+      copy:
+        content: "{{ url_list | to_nice_json }}"
+        dest: "{{ output_file }}"
+      delegate_to: localhost
+
+    - name: Display first 10 URLs
+      debug:
+        msg: "{{ url_list.urls[:10] }}"
+      when: url_list.count > 0
+
+    - name: Cleanup script
+      file:
+        path: "{{ script_path }}"
+        state: absent
