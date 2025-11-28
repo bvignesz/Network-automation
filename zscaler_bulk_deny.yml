@@ -1,11 +1,14 @@
 ---
 - name: Zscaler Denylist Bulk Management
   hosts: all
-  gather_facts: false  # We'll gather facts manually when needed
+  gather_facts: false
   
   vars:
     mode: "deny"
-    bulk_file_local: "{{ bulk_file | default('deny_urls.txt') }}"
+    
+    # Support both file-based and variable-based input
+    bulk_file_local: "{{ bulk_file | default('') }}"
+    url_list: "{{ urls | default([]) }}"
     
     # Execution options
     dry_run: "{{ dry_run_mode | default(false) | bool }}"
@@ -13,14 +16,14 @@
   
   tasks:
     # ========================================================================
-    # Gather Facts (needed for ansible_date_time)
+    # Gather Facts
     # ========================================================================
     
     - name: Gather facts for timestamp
       setup:
       tags: always
 
-    - name: Set dynamic file paths with timestamp
+    - name: Set dynamic file paths
       set_fact:
         bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ ansible_date_time.epoch }}.txt"
         script_path: "/tmp/zscaler_url_automation_{{ ansible_date_time.epoch }}.py"
@@ -37,68 +40,106 @@
           - "=========================================="
           - "   ZSCALER DENYLIST BULK UPDATE"
           - "=========================================="
-          - "Target: {{ inventory_hostname }}"
           - "Mode: {{ mode }}"
-          - "Bulk File: {{ bulk_file_local }}"
           - "Dry-Run: {{ dry_run }}"
           - "ZIA Cloud: {{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
-          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+          - "Input Method: {{ 'File' if bulk_file_local else 'Variables' }}"
           - "=========================================="
       tags: always
 
-    - name: Verify Zscaler environment variables are set
+    - name: Verify Zscaler environment variables
       assert:
         that:
           - lookup('env', 'ZIA_USERNAME') | length > 0
           - lookup('env', 'ZIA_PASSWORD') | length > 0
           - lookup('env', 'ZIA_API_KEY') | length > 0
-        fail_msg: |
-          Missing Zscaler credentials!
-          Configure in Semaphore Environment Variables:
-          - ZIA_USERNAME
-          - ZIA_PASSWORD
-          - ZIA_API_KEY
-          - ZIA_CLOUD
+        fail_msg: "Missing Zscaler credentials in Environment Variables"
         success_msg: "✓ Zscaler credentials validated"
       delegate_to: localhost
       run_once: true
       tags: always
 
-    - name: Check if bulk file exists in repository
-      stat:
-        path: "{{ playbook_dir }}/{{ bulk_file_local }}"
-      register: bulk_file_stat
-      delegate_to: localhost
+    # ========================================================================
+    # Input Validation - File or Variable?
+    # ========================================================================
+
+    - name: Check input method
+      set_fact:
+        using_file: "{{ bulk_file_local | length > 0 }}"
+        using_vars: "{{ url_list | length > 0 }}"
       tags: always
 
-    - name: Fail if bulk file not found
+    - name: Fail if no input provided
       fail:
         msg: |
-          Bulk file not found: {{ bulk_file_local }}
-          Expected location: {{ playbook_dir }}/{{ bulk_file_local }}
-      when: not bulk_file_stat.stat.exists
-      tags: always
-
-    - name: Display bulk file information
-      debug:
-        msg:
-          - "File: {{ bulk_file_local }}"
-          - "Size: {{ bulk_file_stat.stat.size }} bytes"
-          - "Lines: ~{{ (bulk_file_stat.stat.size / 30) | int }}"
+          No URLs provided!
+          
+          Provide URLs via either:
+          1. Extra variable 'urls' (list)
+          2. Extra variable 'bulk_file' (filename)
+          
+          Example with variables:
+          urls:
+            - malicious1.com
+            - malicious2.com
+            - malicious3.com
+      when: not using_file and not using_vars
       tags: always
 
     # ========================================================================
-    # File Transfer
+    # Process File-Based Input
     # ========================================================================
 
-    - name: Copy bulk URL file to execution host
-      copy:
-        src: "{{ playbook_dir }}/{{ bulk_file_local }}"
-        dest: "{{ bulk_file_remote }}"
-        mode: '0644'
+    - name: Process file-based input
+      block:
+        - name: Check if bulk file exists
+          stat:
+            path: "{{ playbook_dir }}/{{ bulk_file_local }}"
+          register: bulk_file_stat
+          delegate_to: localhost
+
+        - name: Fail if file not found
+          fail:
+            msg: "Bulk file not found: {{ playbook_dir }}/{{ bulk_file_local }}"
+          when: not bulk_file_stat.stat.exists
+
+        - name: Copy bulk file to remote
+          copy:
+            src: "{{ playbook_dir }}/{{ bulk_file_local }}"
+            dest: "{{ bulk_file_remote }}"
+            mode: '0644'
+          
+      when: using_file
       tags: transfer
 
-    - name: Copy Python automation script to execution host
+    # ========================================================================
+    # Process Variable-Based Input
+    # ========================================================================
+
+    - name: Process variable-based input
+      block:
+        - name: Display URLs from variables
+          debug:
+            msg: "Processing {{ url_list | length }} URLs from extra variables"
+
+        - name: Create temporary file from URL list
+          copy:
+            content: "{{ url_list | join('\n') }}\n"
+            dest: "{{ bulk_file_remote }}"
+            mode: '0644'
+
+        - name: Display URLs to be processed
+          debug:
+            msg: "{{ url_list }}"
+          
+      when: using_vars
+      tags: transfer
+
+    # ========================================================================
+    # Copy Script
+    # ========================================================================
+
+    - name: Copy Python automation script
       copy:
         src: "{{ playbook_dir }}/zscaler_url_automation.py"
         dest: "{{ script_path }}"
@@ -177,18 +218,18 @@
       when: update_result is defined
       tags: results
 
-    - name: Display added URLs (successful update)
+    - name: Display added URLs
       debug:
-        msg: "Added URLs: {{ update_result.added }}"
+        msg: "Added: {{ update_result.added }}"
       when: 
         - update_result is defined
         - update_result.added_count | default(0) > 0
         - not dry_run
       tags: results
 
-    - name: Display would-be-added URLs (dry-run mode)
+    - name: Display would-be-added URLs (dry-run)
       debug:
-        msg: "Would add URLs: {{ update_result.would_add }}"
+        msg: "Would add: {{ update_result.would_add }}"
       when:
         - update_result is defined
         - dry_run
@@ -197,7 +238,7 @@
 
     - name: Display no-change message
       debug:
-        msg: "✓ No changes needed - all URLs already exist in denylist"
+        msg: "✓ No changes needed - all URLs already exist"
       when:
         - update_result is defined
         - update_result.status == "no_change"
@@ -220,30 +261,13 @@
               - "HTTP Status: {{ update_result.http_status | default('N/A') }}"
               - "=========================================="
 
-        - name: Fail playbook on error
+        - name: Fail playbook
           fail:
-            msg: "Script execution failed. Check error details above."
+            msg: "Script execution failed"
       when:
         - update_result is defined
         - update_result.status == "error"
       tags: results
-
-    # ========================================================================
-    # Logging
-    # ========================================================================
-
-    - name: Fetch execution log
-      slurp:
-        src: "{{ log_file_remote }}"
-      register: remote_log
-      ignore_errors: true
-      tags: cleanup
-
-    - name: Display last 30 lines of log
-      debug:
-        msg: "{{ (remote_log.content | b64decode).split('\n')[-30:] }}"
-      when: remote_log is succeeded
-      tags: cleanup
 
     # ========================================================================
     # Cleanup
@@ -260,7 +284,7 @@
       tags: cleanup
 
     # ========================================================================
-    # Final Summary
+    # Summary
     # ========================================================================
 
     - name: Generate execution summary
@@ -272,7 +296,6 @@
           dry_run: "{{ dry_run }}"
           urls_processed: "{{ update_result.added_count | default(0) }}"
           final_count: "{{ update_result.final_count | default(0) }}"
-          zia_cloud: "{{ lookup('env', 'ZIA_CLOUD') | default('zscaler') }}"
       when: update_result is defined
       tags: summary
 
@@ -282,7 +305,7 @@
       when: execution_summary is defined
       tags: summary
 
-    - name: Playbook completed successfully
+    - name: Playbook completed
       debug:
-        msg: "✓ Playbook execution complete"
+        msg: "✓ Execution complete"
       tags: always
