@@ -1,0 +1,4 @@
+test-malicious1.com
+test-phishing2.net
+test-bad3.org
+EOF
