@@ -270,7 +270,11 @@ class ZscalerURLAutomation:
     def _get_or_create_block_category(self, category_name: str = "Blocked_URLs_Automation") -> Optional[str]:
         """
         Get existing or create new custom URL category for blocked URLs.
-        Uses clean payload to avoid HV000030 keywords validation error.
+        
+        WORKAROUND for SDK Bug (HV000030 keywords validation error):
+        The SDK v1.9.5 has a known issue where add_url_category() causes server-side
+        validation error. We use the SDK's authenticated session to make a direct
+        HTTP POST with a minimal payload that works.
         """
         logger.info(f"📂 Looking for custom category '{category_name}'...")
         
@@ -281,7 +285,7 @@ class ZscalerURLAutomation:
                 logger.error("❌ Could not find URL categories API in SDK")
                 return None
             
-            # Get all categories to check if ours exists
+            # Get all categories to check if ours exists (SDK works fine for GET)
             result = url_categories.list_categories()
             data, error = self._handle_sdk_response(result)
             
@@ -312,45 +316,103 @@ class ZscalerURLAutomation:
             # Create new category if not found
             logger.info(f"📝 Creating new custom category '{category_name}'...")
             
-            # ===== KEY FIX: Only pass required parameters, NO empty arrays =====
-            # DO NOT pass: keywords, keywords_retaining_parent_category, ip_ranges, etc.
-            # These cause HV000030 validation error when empty
+            # ============================================================
+            # WORKAROUND: Use SDK's session for direct HTTP POST
+            # This bypasses the SDK's add_url_category() which has issues
+            # ============================================================
             
-            result = url_categories.add_url_category(
-                configured_name=category_name,
-                super_category="USER_DEFINED",
-                urls=[],  # Empty URLs list is OK - we'll add URLs later
-                custom_category=True,
-                description="Custom category for automated URL blocking"
-                # DO NOT ADD: keywords, ip_ranges, or any other optional fields
-            )
-            
-            data, error = self._handle_sdk_response(result)
-            
-            if error:
-                logger.error(f"❌ SDK error creating category: {error}")
-                return None
-            
-            if data:
-                if hasattr(data, 'as_dict'):
-                    cat_dict = data.as_dict()
-                elif isinstance(data, dict):
-                    cat_dict = data
-                else:
-                    cat_dict = vars(data) if hasattr(data, '__dict__') else {}
+            # Get the SDK's internal session and base URL
+            try:
+                # Access the legacy ZIA client's session
+                zia_client = self.client._zia_legacy_client if hasattr(self.client, '_zia_legacy_client') else None
+                if not zia_client:
+                    # Try alternate path
+                    zia_client = self.client.zia._request_executor.zia_legacy_client if hasattr(self.client.zia, '_request_executor') else None
                 
-                cat_id = cat_dict.get('id', '')
-                logger.info(f"✅ Created new category with ID: {cat_id}")
-                return str(cat_id)
-            
-            logger.error("❌ Failed to create category - no response data")
-            return None
+                if not zia_client:
+                    logger.warning("⚠️ Could not access SDK session, trying SDK method anyway...")
+                    # Fall back to SDK method
+                    return self._create_category_via_sdk(url_categories, category_name)
+                
+                # Get session and base URL from legacy client
+                session = zia_client.session
+                base_url = f"https://zsapi.{self.cloud}.net/api/v1"
+                
+                # Create minimal payload (exactly what Zscaler API expects)
+                # CRITICAL: Do NOT include keywords, ipRanges, etc. - not even as null
+                payload = {
+                    "configuredName": category_name,
+                    "superCategory": "USER_DEFINED",
+                    "customCategory": True,
+                    "type": "URL_CATEGORY",
+                    "urls": [],
+                    "description": "Custom category for automated URL blocking"
+                }
+                
+                logger.info(f"📤 Sending direct POST to {base_url}/urlCategories")
+                logger.info(f"📦 Payload: {json.dumps(payload)}")
+                
+                response = session.post(
+                    f"{base_url}/urlCategories",
+                    json=payload,
+                    headers={"Content-Type": "application/json"}
+                )
+                
+                logger.info(f"📥 Response status: {response.status_code}")
+                
+                if response.status_code in [200, 201]:
+                    result_data = response.json()
+                    cat_id = result_data.get('id', '')
+                    logger.info(f"✅ Created new category with ID: {cat_id}")
+                    return str(cat_id)
+                else:
+                    logger.error(f"❌ API error: {response.status_code} - {response.text}")
+                    # If direct method fails, try SDK as fallback
+                    logger.info("🔄 Trying SDK method as fallback...")
+                    return self._create_category_via_sdk(url_categories, category_name)
+                    
+            except Exception as direct_error:
+                logger.warning(f"⚠️ Direct HTTP failed: {direct_error}, trying SDK...")
+                return self._create_category_via_sdk(url_categories, category_name)
             
         except Exception as e:
             logger.error(f"❌ Error with custom category: {e}")
             import traceback
             traceback.print_exc()
             return None
+    
+    def _create_category_via_sdk(self, url_categories, category_name: str) -> Optional[str]:
+        """Fallback: Create category using SDK method"""
+        logger.info("📝 Creating category via SDK method...")
+        
+        result = url_categories.add_url_category(
+            configured_name=category_name,
+            super_category="USER_DEFINED",
+            urls=[],
+            custom_category=True,
+            description="Custom category for automated URL blocking"
+        )
+        
+        data, error = self._handle_sdk_response(result)
+        
+        if error:
+            logger.error(f"❌ SDK error creating category: {error}")
+            return None
+        
+        if data:
+            if hasattr(data, 'as_dict'):
+                cat_dict = data.as_dict()
+            elif isinstance(data, dict):
+                cat_dict = data
+            else:
+                cat_dict = vars(data) if hasattr(data, '__dict__') else {}
+            
+            cat_id = cat_dict.get('id', '')
+            logger.info(f"✅ Created new category with ID: {cat_id}")
+            return str(cat_id)
+        
+        logger.error("❌ Failed to create category - no response data")
+        return None
     
     def _add_url_to_category(self, category_id: str, url: str) -> bool:
         """Add a URL to a custom URL category using SDK"""
