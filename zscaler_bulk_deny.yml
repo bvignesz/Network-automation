@@ -5,7 +5,7 @@
   
   vars:
     mode: "deny"
-    bulk_file_local: "{{ bulk_file }}"
+    bulk_file_local: "{{ bulk_file | default('deny_urls.txt') }}"
     dry_run: "{{ dry_run_mode | default(true) | bool }}"
   
   tasks:
@@ -14,57 +14,47 @@
 
     - name: Set dynamic paths
       set_fact:
-        bulk_file_remote: "/tmp/zscaler_bulk_urls_{{ ansible_date_time.epoch }}.txt"
-        script_path: "/tmp/zscaler_url_automation_{{ ansible_date_time.epoch }}.py"
-        log_file_remote: "/tmp/zscaler_automation_{{ ansible_date_time.epoch }}.log"
+        bulk_file_remote: "/tmp/zscaler_bulk_{{ ansible_date_time.epoch }}.txt"
+        script_path: "/tmp/zscaler_script_{{ ansible_date_time.epoch }}.py"
+        log_file: "/tmp/zscaler_log_{{ ansible_date_time.epoch }}.log"
 
-    - name: Display execution banner
+    - name: Display banner
       debug:
         msg:
           - "=========================================="
-          - "   ZSCALER DENYLIST BULK UPDATE"
-          - "=========================================="
-          - "Mode: {{ mode }}"
-          - "Bulk File: {{ bulk_file_local }}"
+          - "File: {{ bulk_file_local }}"
           - "Dry-Run: {{ dry_run }}"
           - "=========================================="
 
-    - name: Verify Zscaler credentials
+    - name: Verify credentials
       assert:
         that:
           - lookup('env', 'ZIA_USERNAME') | length > 0
           - lookup('env', 'ZIA_PASSWORD') | length > 0
           - lookup('env', 'ZIA_API_KEY') | length > 0
-        fail_msg: "Missing Zscaler credentials"
+        fail_msg: "Missing credentials"
       delegate_to: localhost
       run_once: true
 
-    - name: Check if bulk file exists
+    - name: Check file exists
       stat:
         path: "{{ playbook_dir }}/{{ bulk_file_local }}"
-      register: bulk_file_stat
+      register: file_check
       delegate_to: localhost
 
-    - name: Show file path being checked
-      debug:
-        msg: "Looking for: {{ playbook_dir }}/{{ bulk_file_local }}"
-
-    - name: Fail if file not found
+    - name: Fail if not found
       fail:
-        msg: "File not found: {{ playbook_dir }}/{{ bulk_file_local }}"
-      when: not bulk_file_stat.stat.exists
+        msg: "File not found: {{ bulk_file_local }}"
+      when: not file_check.stat.exists
 
-    - name: Copy bulk file
+    - name: Copy files
       copy:
-        src: "{{ playbook_dir }}/{{ bulk_file_local }}"
-        dest: "{{ bulk_file_remote }}"
-        mode: '0644'
-
-    - name: Copy Python script
-      copy:
-        src: "{{ playbook_dir }}/zscaler_url_automation.py"
-        dest: "{{ script_path }}"
-        mode: '0755'
+        src: "{{ playbook_dir }}/{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "{{ bulk_file_local }}", dest: "{{ bulk_file_remote }}", mode: '0644' }
+        - { src: "zscaler_url_automation.py", dest: "{{ script_path }}", mode: '0755' }
 
     - name: Install dependencies
       pip:
@@ -75,7 +65,7 @@
         executable: pip3
         extra_args: --user
 
-    - name: Execute Zscaler script
+    - name: Run script
       shell: |
         export ZIA_USERNAME="{{ lookup('env', 'ZIA_USERNAME') }}"
         export ZIA_PASSWORD="{{ lookup('env', 'ZIA_PASSWORD') }}"
@@ -85,50 +75,30 @@
           --mode {{ mode }} \
           --bulk-file {{ bulk_file_remote }} \
           {% if dry_run %}--dry-run{% endif %} \
-          --log-file {{ log_file_remote }}
-      register: script_execution
+          --log-file {{ log_file }}
+      register: result
+      failed_when: false
       changed_when: false
-      failed_when: script_execution.rc != 0
 
-    - name: Parse result
-      set_fact:
-        update_result: "{{ script_execution.stdout | from_json }}"
-      when: script_execution.rc == 0
-
-    - name: Display summary
+    - name: Show what script returned
       debug:
         msg:
-          - "=========================================="
-          - "Status: {{ update_result.status | upper }}"
-          - "Message: {{ update_result.message | default('N/A') }}"
-          - "Existing URLs: {{ update_result.existing_count | default(0) }}"
-          - "URLs Added: {{ update_result.added_count | default(0) }}"
-          - "Final Count: {{ update_result.final_count | default(0) }}"
-          - "=========================================="
-      when: update_result is defined
+          - "Return code: {{ result.rc }}"
+          - "Output: {{ result.stdout }}"
+          - "Errors: {{ result.stderr }}"
 
-    - name: Show added URLs
+    - name: Try to parse JSON
+      set_fact:
+        parsed: "{{ result.stdout | from_json }}"
+      when: result.rc == 0 and result.stdout | length > 0
+      ignore_errors: true
+
+    - name: Show result if parsed
       debug:
-        msg: "Added: {{ update_result.added }}"
-      when: 
-        - update_result is defined
-        - update_result.added_count | default(0) > 0
-        - not dry_run
-
-    - name: Show would-add URLs (dry-run)
-      debug:
-        msg: "Would add: {{ update_result.would_add }}"
-      when:
-        - update_result is defined
-        - dry_run
-        - update_result.would_add_count | default(0) > 0
-
-    - name: Handle errors
-      fail:
-        msg: "Error: {{ update_result.message }}"
-      when:
-        - update_result is defined
-        - update_result.status == "error"
+        msg:
+          - "Status: {{ parsed.status }}"
+          - "Added: {{ parsed.added_count | default(0) }}"
+      when: parsed is defined
 
     - name: Cleanup
       file:
@@ -137,8 +107,8 @@
       loop:
         - "{{ bulk_file_remote }}"
         - "{{ script_path }}"
-        - "{{ log_file_remote }}"
+        - "{{ log_file }}"
 
-    - name: Execution complete
+    - name: Done
       debug:
-        msg: "✓ Playbook complete"
+        msg: "Complete"
